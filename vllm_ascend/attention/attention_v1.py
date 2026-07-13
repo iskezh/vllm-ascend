@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 
@@ -60,6 +61,165 @@ from vllm_ascend.utils import weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
+_GLSE_DEBUG_PRINT = os.environ.get("VLLM_ASCEND_GLSE_DEBUG", "0") == "1"
+# antiquant_mode = int(threshold * 10 - 100), default threshold = -3 => -130
+_GLSE_ANTIQUANT_THRESHOLD = float(os.environ.get("VLLM_ASCEND_GLSE_ANTIQUANT_THRESHOLD", "-3"))
+_GLSE_ANTIQUANT_MODE = int(_GLSE_ANTIQUANT_THRESHOLD * 10 - 100)
+# 独立于 GLSE_DEBUG，仅传入 antiquant_mode，不打印不 dump
+_ANTIQUANT_ONLY = os.environ.get("VLLM_ASCEND_ANTIQUANT_ONLY", "0") == "1"
+_GLSE_DUMP_DECODE = os.environ.get("VLLM_ASCEND_GLSE_DUMP_DECODE", "0") == "1"
+_GLSE_DUMP_DIR = os.environ.get(
+    "VLLM_ASCEND_GLSE_DUMP_DIR",
+    "/home/z00603376/blasst_model/kvcomp/glse_dump")
+_GLSE_SAMPLE_INTERVAL = int(os.environ.get("VLLM_ASCEND_GLSE_SAMPLE_INTERVAL", "100"))
+# 指定需要 dump 的 layer，逗号分隔，如 "20,30,50"
+_GLSE_DUMP_TARGET_LAYERS = set()
+_raw = os.environ.get("VLLM_ASCEND_GLSE_DUMP_LAYERS", "")
+if _raw:
+    _GLSE_DUMP_TARGET_LAYERS = {int(x.strip()) for x in _raw.split(",") if x.strip().isdigit()}
+_glse_call_counter = 0
+_glse_enable_lse_flag = False  # 每 N 次才开启 softmax_lse_flag
+_glse_dumped_target_layers = set()  # 已 dump 的 target layer
+
+
+def _get_stage_name(attn_state):
+    """Map AscendAttentionState to human-readable stage name for logging."""
+    stage_map = {
+        0: "prefill",           # PrefillNoCache
+        1: "prefill_cache",     # PrefillCacheHit
+        2: "decode",            # DecodeOnly
+        3: "chunked_prefill",   # ChunkedPrefill
+        4: "spec_decode",       # SpecDecoding
+    }
+    raw = attn_state.value if hasattr(attn_state, "value") else int(attn_state)
+    return stage_map.get(raw, "unknown")
+
+
+_glse_dumped_layers = set()
+
+
+def _glse_need_dump_layer(layer_name):
+    """检查当前 layer 是否是 dump target 且尚未 dump。"""
+    import re
+    if not _GLSE_DUMP_DECODE or not _GLSE_DUMP_TARGET_LAYERS:
+        return False
+    m = re.search(r"layers\.(\d+)", layer_name)
+    if m:
+        lid = int(m.group(1))
+        return lid in _GLSE_DUMP_TARGET_LAYERS and lid not in _glse_dumped_target_layers
+    return False
+
+
+def _glse_should_sample(layer_name=""):
+    """每 _GLSE_SAMPLE_INTERVAL 次调用返回 True，或当前 layer 是 dump target 且未 dump 过。
+
+    返回 True 时 softmax_lse_flag 开启，可获取 gLse 数据用于打印或 dump。
+    """
+    global _glse_call_counter, _glse_enable_lse_flag
+    _glse_call_counter += 1
+    periodic = (_glse_call_counter % _GLSE_SAMPLE_INTERVAL == 0)
+    is_target = _glse_need_dump_layer(layer_name)
+    _glse_enable_lse_flag = periodic or is_target
+    return _glse_enable_lse_flag
+
+
+def _glse_brief_print(layer_name, stage, sample=False):
+    """简单打印：layer + stage + antiquant_mode。sample=True 时标明本次采样 gLse。"""
+    tag = "[SAMPLE]" if sample else ""
+    print(f"[GLSE{tag}][{stage}] layer={layer_name} "
+          f"antiquant_mode={_GLSE_ANTIQUANT_MODE} call={_glse_call_counter}")
+
+
+def _dump_decode_tensors(softmax_lse, layer_name, stage, **tensors):
+    """Dump decode attention tensors to .pt for offline single-op reproduction.
+
+    Only dumps every 5th layer (layer_id % 5 == 0), and each layer only
+    on first non-integer hit to avoid excessive disk usage.
+    """
+    import time
+    import re
+
+    try:
+        match = re.search(r"layers\.(\d+)", layer_name)
+        layer_id = int(match.group(1)) if match else -1
+        # target layer dump: 不检查旧限制，直接 dump 一次
+        # 只有 target layer 才 dump
+        if layer_id not in _GLSE_DUMP_TARGET_LAYERS:
+            return
+        if layer_id in _glse_dumped_target_layers:
+            return
+        _glse_dumped_target_layers.add(layer_id)
+
+        os.makedirs(_GLSE_DUMP_DIR, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        pid = os.getpid()
+        filename = f"layer_{layer_id}_{timestamp}_pid{pid}.pt"
+        dump_path = os.path.join(_GLSE_DUMP_DIR, filename)
+
+        dump_data = {"layer_id": layer_id, "inputs": {}, "outputs": {}}
+        for k, v in tensors.items():
+            if k == "attn_output":
+                dump_data["outputs"]["attn_output"] = v.cpu() if isinstance(v, torch.Tensor) else v
+            elif isinstance(v, torch.Tensor):
+                dump_data["inputs"][k] = v.cpu()
+            elif isinstance(v, (int, float)):
+                dump_data["inputs"][k] = torch.tensor(v)
+            else:
+                dump_data["inputs"][k] = v
+        dump_data["outputs"]["softmax_lse"] = softmax_lse.cpu()
+
+        torch.save(dump_data, dump_path)
+        print(f"[GLSE][{stage}] layer={layer_name} DUMPED tensors to {dump_path}")
+    except Exception as e:
+        print(f"[GLSE][{stage}] layer={layer_name} DUMP FAILED: {e}")
+
+
+def _parse_glse_block_info(softmax_lse, layer_name, stage="", **dump_kwargs):
+    """Parse gLse tensor to extract sparse block and total block counts.
+
+    Follows the GLSE parsing pattern from the FIA precision test
+    (test_accuracy_with_rowloop_sparse_v1.py).
+    Prints: [GLSE][stage] layer=layer_name sparseblock=N / totalblock=M
+
+    If any value is non-integer, prints "0 / 0".
+    When _GLSE_DUMP_DECODE is set and stage=="decode" and non-int detected,
+    dumps tensors via _dump_decode_tensors.
+    """
+    try:
+        data_1d = softmax_lse.flatten().cpu().float()
+        print(f"[GLSE][{stage}] layer={layer_name} glse_len={len(data_1d)} shape={softmax_lse.shape}")
+        if len(data_1d) < 32:
+            print(f"[GLSE][{stage}] layer={layer_name} sparseblock=0 / totalblock=0 (len<32)")
+            return
+        coreNum = min(24, len(data_1d) // 16)
+        blockSparseNum = 0.0
+        blockNum = 0.0
+        core_details = []
+        for core in range(coreNum):
+            sparse_c = data_1d[core * 16].item()
+            count_c = data_1d[core * 16 + 1].item()
+            blockSparseNum += sparse_c
+            blockNum += count_c
+            core_details.append(f"c{core}:s={sparse_c:.2f}/c={count_c:.2f}")
+        # Print per-core raw values for debugging
+        print(f"[GLSE][{stage}] layer={layer_name} per_core: {' | '.join(core_details)}")
+        # Check if both are effectively integers
+        sparse_int = int(round(blockSparseNum))
+        block_int = int(round(blockNum))
+        if (abs(blockSparseNum - sparse_int) > 1e-4
+                or abs(blockNum - block_int) > 1e-4
+                or block_int == 0):
+            print(f"[GLSE][{stage}] layer={layer_name} sparseblock=0 / totalblock=0 (non_int sparseSum={blockSparseNum:.2f} blockSum={blockNum:.2f})")
+            if _GLSE_DUMP_DECODE and stage == "decode" and dump_kwargs:
+                _dump_decode_tensors(softmax_lse, layer_name, stage, **dump_kwargs)
+        else:
+            print(f"[GLSE][{stage}] layer={layer_name} sparseblock={sparse_int} / totalblock={block_int}")
+            # 对于 target layer，即使 gLse 正常也 dump
+            if (_GLSE_DUMP_DECODE and stage == "decode" and dump_kwargs
+                    and _glse_need_dump_layer(layer_name)):
+                _dump_decode_tensors(softmax_lse, layer_name, stage, **dump_kwargs)
+    except Exception as e:
+        print(f"[GLSE][{stage}] layer={layer_name} sparseblock=0 / totalblock=0 err={e}")
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -526,6 +686,28 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                     event.record(update_stream)
 
+                    if _GLSE_DEBUG_PRINT:
+                        event.synchronize()
+                        if hasattr(actual_seq_lengths_q, 'numel'):
+                            is_decode = actual_seq_lengths_q[-1].item() == len(seq_lens)
+                        else:
+                            is_decode = actual_seq_lengths_q[-1] == len(seq_lens)
+                        stage = "decode" if is_decode else "prefill"
+                        layer_name = key if isinstance(key, str) else "unknown"
+                        sample = _glse_should_sample(layer_name)
+                        if sample:
+                            _parse_glse_block_info(
+                                softmax_lse, layer_name, stage,
+                                query=query, key=key_cache, value=value,
+                                attn_output=attn_output, block_table=block_tables,
+                                block_size=block_size,
+                                actual_seq_qlen=actual_seq_lengths_q,
+                                actual_seq_kvlen=seq_lens,
+                                num_heads=num_heads, num_kv_heads=num_kv_heads,
+                                scale=scale)
+                        else:
+                            _glse_brief_print(layer_name, stage)
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
         if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
@@ -538,6 +720,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        layer_name: str = "",
     ) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
@@ -552,7 +735,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # Get workspace from cache or calculate it if not present.
         workspace = graph_params.workspaces.get(num_tokens)
-        softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
+        if _GLSE_DEBUG_PRINT:
+            softmax_lse = torch.empty(self.num_heads, num_tokens, dtype=torch.float32, device=query.device)
+        else:
+            softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
@@ -599,6 +785,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
         )
 
+        extra_args = {}
+        if _GLSE_DEBUG_PRINT or _ANTIQUANT_ONLY:
+            extra_args["antiquant_mode"] = _GLSE_ANTIQUANT_MODE
+            if _GLSE_DEBUG_PRINT:
+                extra_args["softmax_lse_flag"] = True
+
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score.out(
             query=query,
@@ -616,7 +808,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sparse_mode=3,
             workspace=workspace,
             out=[output, softmax_lse],
+            **extra_args,
         )
+
+        if _GLSE_DEBUG_PRINT:
+            # 用 actual_seq_lengths_q 判断真正的 decode/prefill，
+            # 而非 attn_metadata.attn_state（FULL_DECODE_ONLY 图模式可能不准）
+            if actual_seq_lengths_q[-1].item() == len(attn_metadata.seq_lens):
+                stage = "decode"
+            else:
+                stage = "prefill"
+            sample = _glse_should_sample(layer_name)
+            if sample:
+                _parse_glse_block_info(
+                    softmax_lse, layer_name, stage,
+                    query=query, key=key, value=value,
+                    attn_output=output, block_table=block_table,
+                    block_size=block_size,
+                    actual_seq_qlen=actual_seq_lengths_q,
+                    actual_seq_kvlen=actual_seq_lengths_kv,
+                    num_heads=self.num_heads, num_kv_heads=self.num_kv_heads,
+                    scale=self.scale)
+            else:
+                _glse_brief_print(layer_name, stage)
 
         output = output.view(num_tokens, self.num_heads, self.head_size)
 
@@ -765,12 +979,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        layer_name: str = "",
     ):
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
-            attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
+            attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer_name)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
         if (
@@ -800,7 +1015,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 atten_mask = attn_metadata.attn_mask
                 sparse_mode = 3
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+            fia_kwargs = {}
+            if _GLSE_DEBUG_PRINT or _ANTIQUANT_ONLY:
+                fia_kwargs["antiquant_mode"] = _GLSE_ANTIQUANT_MODE
+                sample = _GLSE_DEBUG_PRINT and _glse_should_sample(layer_name)
+                if sample:
+                    fia_kwargs["softmax_lse_flag"] = True
+            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
                 key,
                 value,
@@ -817,9 +1038,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_qlen=actual_seq_qlen,
                 actual_seq_kvlen=actual_seq_lengths_kv,
                 learnable_sink=self.sinks,
+                **fia_kwargs,
             )
+            if _GLSE_DEBUG_PRINT:
+                stage = _get_stage_name(attn_metadata.attn_state)
+                if sample:
+                    _parse_glse_block_info(
+                        softmax_lse, layer_name, stage,
+                        query=query, key=key, value=value,
+                        attn_output=attn_output, block_table=block_table,
+                        block_size=block_size, actual_seq_qlen=actual_seq_qlen,
+                        actual_seq_kvlen=actual_seq_lengths_kv,
+                        num_heads=self.num_heads, num_kv_heads=self.num_kv_heads,
+                        scale=self.scale)
+                else:
+                    _glse_brief_print(layer_name, stage)
         else:
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            fia_kwargs = {}
+            if _GLSE_DEBUG_PRINT or _ANTIQUANT_ONLY:
+                fia_kwargs["antiquant_mode"] = _GLSE_ANTIQUANT_MODE
+                sample = _GLSE_DEBUG_PRINT and _glse_should_sample(layer_name)
+                if sample:
+                    fia_kwargs["softmax_lse_flag"] = True
+            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score(
                 query=query,
                 key=key,
                 value=value,
@@ -833,7 +1074,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_heads=self.num_heads,
                 scale=self.scale,
                 sparse_mode=3,
+                **fia_kwargs,
             )
+
+            if _GLSE_DEBUG_PRINT:
+                stage = _get_stage_name(attn_metadata.attn_state)
+                if sample:
+                    _parse_glse_block_info(
+                        softmax_lse, layer_name, stage,
+                        query=query, key=key, value=value,
+                        attn_output=attn_output, block_table=block_table,
+                        block_size=block_size,
+                        actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                        actual_seq_kvlen=actual_seq_lengths_kv,
+                        num_heads=self.num_heads, num_kv_heads=self.num_kv_heads,
+                        scale=self.scale)
+                else:
+                    _glse_brief_print(layer_name, stage)
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
@@ -917,6 +1174,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         kv_cache: tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
+        layer_name: str = "",
     ):
         num_tokens = query.shape[0]
         if (
@@ -926,7 +1184,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
-            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output)
+            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, layer_name)
 
         return output
 
@@ -974,9 +1232,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output[:num_tokens] = attn_output[:num_tokens]
             return output
         if output_padded is not None:
-            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded, layer.layer_name)
         else:
-            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+            attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output, layer.layer_name)
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 
