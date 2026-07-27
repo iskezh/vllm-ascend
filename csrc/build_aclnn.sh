@@ -43,6 +43,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
 
     CUSTOM_OPS_ARRAY=(
+        "fused_infer_attention_score"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer_vllm"
         "sparse_flash_attention"

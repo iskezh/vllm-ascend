@@ -42,6 +42,7 @@
 #include "moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "moe_init_routing_custom/moe_init_routing_custom_torch_adpt.h"
 #include "sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "fused_infer_attention_score/fused_infer_attention_score_torch_adpt.h"
 #include "lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/util/Exception.h>
@@ -805,6 +806,19 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           int sparse_mode=3) -> Tensor"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+
+    ops.def(
+        "npu_fused_infer_attention_score(Tensor query, Tensor key, Tensor value,"
+        "                                Tensor? pse_shift=None, Tensor? atten_mask=None,"
+        "                                Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None,"
+        "                                Tensor? blocktable=None, int num_heads=1, float scale=1.0,"
+        "                                int pre_tokens=2147483647, int next_tokens=2147483647,"
+        "                                str input_layout='TND', int num_key_value_heads=0,"
+        "                                int sparse_mode=0, int inner_precise=0, int block_size=0,"
+        "                                int antiquant_mode=0, float sparse_lambda=-99.0,"
+        "                                bool softmax_lse_flag=False) -> (Tensor attention_out, Tensor softmax_lse)"
+    );
+    ops.impl("npu_fused_infer_attention_score", torch::kPrivateUse1, &vllm_ascend::npu_fused_infer_attention_score);
 
     ops.def(
         "dispatch_ffn_combine(Tensor x, Tensor[] weight1, Tensor[] weight2, Tensor expert_idx,"
