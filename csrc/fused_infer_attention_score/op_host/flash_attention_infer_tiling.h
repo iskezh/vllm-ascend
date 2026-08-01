@@ -241,11 +241,11 @@ namespace optiling{
         faTilingData.set_scaleValue(faInfo_.scaleValue);
         faTilingData.set_sparseLamda(faInfo_.sparseLamda);
         faTilingData.set_sparseMode(faInfo_.sparseMode);
-        printf("[FIA_TILING_BASIC] sparseLambda=%.2f sparseMode=%d numHeads=%d kvHeads=%d "
-                "batch=%d maxQ=%ld maxKV=%ld numBlocks=%d blockSize=%d paged=%d\n",
-                faInfo_.sparseLamda, faInfo_.sparseMode, faInfo_.numHeads, faInfo_.kvHeads,
-                faInfo_.batch, (long)faInfo_.maxQSeqlen, (long)faInfo_.maxKvSeqlen,
-                faInfo_.numBlocks, faInfo_.blockSize, (int)faInfo_.pagedCacheFlag);
+        // printf("[FIA_TILING_BASIC] sparseLambda=%.2f sparseMode=%d numHeads=%d kvHeads=%d "
+        //         "batch=%d maxQ=%ld maxKV=%ld numBlocks=%d blockSize=%d paged=%d\n",
+        //         faInfo_.sparseLamda, faInfo_.sparseMode, faInfo_.numHeads, faInfo_.kvHeads,
+        //         faInfo_.batch, (long)faInfo_.maxQSeqlen, (long)faInfo_.maxKvSeqlen,
+        //         faInfo_.numBlocks, faInfo_.blockSize, (int)faInfo_.pagedCacheFlag);
         faTilingData.set_preToken(static_cast<int64_t>(faInfo_.preToken));
         faTilingData.set_nextToken(static_cast<int64_t>(faInfo_.nextToken));
         faTilingData.set_pseQ(faInfo_.pseQ);

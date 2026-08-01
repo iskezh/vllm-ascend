@@ -34,11 +34,11 @@ inline std::tuple<at::Tensor, at::Tensor> npu_fused_infer_attention_score(
     int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
     int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag)
 {
-    printf("[FIA_ADAPTER] sparseLambda=%.2f sparseMode=%ld blockSize=%ld "
-            "numHeads=%ld numKVHeads=%ld scale=%.6f lseFlag=%d paged=%d\n",
-            sparse_lambda, (long)sparse_mode, (long)block_size,
-            (long)num_heads, (long)num_key_value_heads, scale,
-            (int)softmax_lse_flag, (int)blocktable.has_value());
+    // printf("[FIA_ADAPTER] sparseLambda=%.2f sparseMode=%ld blockSize=%ld "
+    //         "numHeads=%ld numKVHeads=%ld scale=%.6f lseFlag=%d paged=%d\n",
+    //         sparse_lambda, (long)sparse_mode, (long)block_size,
+    //         (long)num_heads, (long)num_key_value_heads, scale,
+    //         (int)softmax_lse_flag, (int)blocktable.has_value());
     TORCH_CHECK(query.dim() == 3, "query must be 3D TND layout");
     TORCH_CHECK(key.dim() == 3, "key must be 3D TND layout");
     TORCH_CHECK(value.dim() == 3, "value must be 3D TND layout");

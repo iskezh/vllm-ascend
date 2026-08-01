@@ -783,54 +783,6 @@ public:
 
     __aicore__ inline
     void UpdateGlobalRowMax(uint32_t rowNumCurLoop, uint32_t rowNumCurLoopRound, uint32_t columnNum,
-        uint32_t columnNumRound, uint32_t dmUbOffsetCurCycle, uint32_t rowOffset, uint32_t isFirstStackTile)
-    {
-        if (isFirstStackTile) {
-            AscendC::DataCopy(
-                hmUbTensor[rowOffset],
-                lmUbTensor[rowOffset],
-                AscendC::DataCopyParams(1, rowNumCurLoopRound / FLOAT_BLOCK_SIZE, 0, 0));
-            AscendC::PipeBarrier<PIPE_V>();
-        } else {
-            SetVecMask(rowNumCurLoop);
-            // *** hm = vmax(lm, gm)
-            AscendC::Max<float, false>(
-                hmUbTensor[rowOffset],
-                lmUbTensor[rowOffset],
-                gmUbTensor[rowOffset],
-                (uint64_t)0,
-                1,
-                AscendC::BinaryRepeatParams(1, 1, 1, 8, 8, 8));
-            AscendC::PipeBarrier<PIPE_V>();
-            // *** dm = gm - hm
-            AscendC::Sub<float, false>(
-                dmUbTensor[dmUbOffsetCurCycle],
-                gmUbTensor[rowOffset],
-                hmUbTensor[rowOffset],
-                (uint64_t)0,
-                1,
-                AscendC::BinaryRepeatParams(1, 1, 1, 8, 8, 8));
-            AscendC::PipeBarrier<PIPE_V>();
-            // *** dm = exp(dm)
-            AscendC::Exp<float, false>(
-                dmUbTensor[dmUbOffsetCurCycle],
-                dmUbTensor[dmUbOffsetCurCycle],
-                (uint64_t)0,
-                1,
-                AscendC::UnaryRepeatParams(1, 1, 8, 8));
-        }
-        AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
-        AscendC::PipeBarrier<PIPE_V>();
-        // *** gm = hm
-        AscendC::DataCopy(
-            gmUbTensor[rowOffset],
-            hmUbTensor[rowOffset],
-            AscendC::DataCopyParams(1, rowNumCurLoopRound / FLOAT_BLOCK_SIZE, 0, 0));
-        AscendC::PipeBarrier<PIPE_V>();
-    }
-
-    __aicore__ inline
-    void UpdateGlobalRowMax(uint32_t rowNumCurLoop, uint32_t rowNumCurLoopRound, uint32_t columnNum,
         uint32_t columnNumRound, uint32_t dmUbOffsetCurCycle, uint32_t rowOffset, uint32_t isFirstStackTile, uint32_t pingpongFlag, uint8_t* sp_flag_temp)
     {
         if (isFirstStackTile) {
@@ -866,7 +818,10 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::V_S>(pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_S>(pingpongFlag);
 
-                bool spRes = dmUbTensor[dmUbOffsetCurCycle].GetValue(0) < sparseLamda;
+                float dm_val = dmUbTensor[dmUbOffsetCurCycle].GetValue(0);
+                bool spRes = dm_val < sparseLamda;
+                // AscendC::printf("[SP-DM] dm=%.6f ro=%u isF=%u spRes=%u\n",
+                //     dm_val, rowOffset, isFirstStackTile, (uint32_t)spRes);
                 if ((!isFirstStackTile) && (spRes == 1)) {
                     *sp_flag_temp = 1;
 
@@ -973,8 +928,11 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::V_S>(pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_S>(pingpongFlag);
 
-                bool spRes = dmUbTensor[dmUbOffsetCurCycle].GetValue(0) < sparseLamda;
-                if ((!isFirstStackTile) && (!isLastStackTile) && (spRes == 1)) {
+                float dm_val = dmUbTensor[dmUbOffsetCurCycle].GetValue(0);
+                bool spRes = dm_val < sparseLamda;
+                // AscendC::printf("[SP-DM] dm=%.6f ro=%u isF=%u spRes=%u\n",
+                //     dm_val, rowOffset, isFirstStackTile, (uint32_t)spRes);
+                if ((!isFirstStackTile) && (spRes == 1)) {
                     *sp_flag_temp = 1;
 
                     uint32_t first_group = rowOffset / 16;
@@ -1258,13 +1216,49 @@ public:
             }
         }
         CalcLocalRowMax(sUbOffset, rowNumCurLoopRound, columnNum, columnNumRound, rowOffset);
+        uint8_t sp_flag_temp = 0;
         UpdateGlobalRowMax(
             rowNumCurLoop, rowNumCurLoopRound,
             columnNum, columnNumRound,
             dmUbOffsetCurCycle,
             rowOffset,
-            isFirstStackTile);
+            isFirstStackTile, pingpongFlag, &sp_flag_temp);
+                    
+        if (sp_flag_temp == 1) {
+            AscendC::Duplicate<float, false>(
+                lsUbTensor[sUbOffset], 0.0f, (uint64_t)0, 
+                NpuArch::Detail::Alignment::CeilDiv(rowNumCurLoop * columnNumRound, FLOAT_VECTOR_SIZE),
+                1, 8);   
+            AscendC::PipeBarrier<PIPE_V>();
+            
+            if constexpr (!doTriUMask) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(pingpongFlag);
+            }
 
+            DownCastP(sUbOffset, rowNumCurLoop, columnNumRound);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(pingpongFlag);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(pingpongFlag);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(pingpongFlag);
+            
+            CopyPUbToGm(gOutput, sUbOffset, rowNumCurLoop, columnNumRound, columnNumPad);
+            
+            if constexpr (!doTriUMask) {
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(pingpongFlag);
+                if (isLastNoMaskStackTile && isLastRowLoop) {
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+                    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+                }
+            } else {
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+            }
+            if (isLastRowLoop) {
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID1);
+            }
+
+            AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
+            return;
+        }
+        
         CalcExp(sUbOffset, rowNumCurLoop, rowNumCurLoopRound, columnNum, columnNumRound, rowOffset);
         if constexpr (!doTriUMask) {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(pingpongFlag);
@@ -1339,12 +1333,20 @@ public:
 
         if (sp_flag_temp == 1) {
             // AscendC::printf("[SP-SKIP] SubCoreCompute sparse skip! rowOff=%u\n", rowOffset);
+             AscendC::Duplicate<float, false>(
+                lsUbTensor[sUbOffset], 0.0f, (uint64_t)0, 
+                NpuArch::Detail::Alignment::CeilDiv(rowNumCurLoop * columnNumRound, FLOAT_VECTOR_SIZE),
+                1, 8);   
+            AscendC::PipeBarrier<PIPE_V>();
+            
             if constexpr (!doTriUMask) {
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(pingpongFlag);
             }
-
+            DownCastP(sUbOffset, rowNumCurLoop, columnNumRound);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(pingpongFlag);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(pingpongFlag);
-
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(pingpongFlag);
+            CopyPUbToGm(gOutput, sUbOffset, rowNumCurLoop, columnNumRound, columnNumPad);
             if constexpr (!doTriUMask) {
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(pingpongFlag);
                 if (isLastNoMaskStackTile && isLastRowLoop) {

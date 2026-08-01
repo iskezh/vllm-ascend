@@ -174,7 +174,6 @@ namespace SplitFuse {
 
             uint32_t coreIdx = AscendC::GetBlockIdx();
             uint32_t coreNum = AscendC::GetBlockNum();
-            if (coreIdx == 0) { AscendC::printf("[TILING] coreNum=%u sparseLamda=%f updateSize=%lu\n", coreNum, sparseLamda, updateSize); }
 #ifdef __DAV_C220_CUBE__
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(EVENT_ID1);
@@ -404,11 +403,6 @@ namespace SplitFuse {
                     gLse[lseWriteIdx].SetValue(0, 1.0f * blockSparseCount);
                     gLse[lseWriteIdx].SetValue(1, 1.0f * blockCount);
                     AscendC::DataCacheCleanAndInvalid<ElementLse, AscendC::CacheLine::SINGLE_CACHE_LINE, AscendC::DcciDst::CACHELINE_OUT>(gLse[lseWriteIdx]);
-                }
-                if (coreIdx < AscendC::GetBlockNum()) {
-                    AscendC::printf("[LSE-PER-CORE] core=%u sparse=%u / total=%u (sparsity=%f)\n",
-                        coreIdx, blockSparseCount, blockCount,
-                        blockCount > 0 ? (100.0f * blockSparseCount / blockCount) : 0.0f);
                 }
             }
 #endif
@@ -938,9 +932,6 @@ namespace SplitFuse {
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(softmaxReady);
                         epilogueOnlineSoftmax.StoreSpFlagResIntoHmb(gSp, gmOffsetSp, printFlag);
                         gSpTempArr[curStackTileMod] = (epilogueOnlineSoftmax.GetSpFlag() == 1);
-                        // AscendC::printf("[SP] mod=%u sp=%u bitmap=%u lamda=%.1f\n",
-                        //     curStackTileMod, gSpTempArr[curStackTileMod],
-                        //     epilogueOnlineSoftmax.GetSpFlagBitmap(), sparseLamda);
                         rowLoopCount += 4;
                         gSpRowLoopArr[curStackTileMod] = (epilogueOnlineSoftmax.GetSpFlagBitmap());
                         if (gSpRowLoopArr[curStackTileMod] != 0) {

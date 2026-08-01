@@ -17,8 +17,6 @@
 #include "../../../attn_infra/gemm/tile_common/copy_l1_to_l0a.hpp"
 #include "../../../attn_infra/gemm/tile_common/copy_l1_to_l0b.hpp"
 #include "../../../attn_infra/gemm/tile_common/copy_l1_to_bt.hpp"
-#include "../../../attn_infra/gemm/tile_common/copy_gm_to_ub.hpp"
-#include "../../../attn_infra/gemm/tile_common/copy_ub_to_gm.hpp"
 #include "../../../attn_infra/gemm/helper.hpp"
 
 

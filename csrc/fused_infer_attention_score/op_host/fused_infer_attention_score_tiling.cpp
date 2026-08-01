@@ -346,12 +346,12 @@ static ge::graphStatus ConvertContextToFAInferContext(gert::TilingContext *conte
                 ql -= actualSeqQ[b - 1];
                 if (!pagedCacheFlag) kvl -= actualSeqKv[b - 1];
             }
-            printf("[FIA_TILING_DBG] batch[%d] qlen=%ld kvlen=%ld\n", b, (long)ql, (long)kvl);
+            // printf("[FIA_TILING_DBG] batch[%d] qlen=%ld kvlen=%ld\n", b, (long)ql, (long)kvl);
         }
-        printf("[FIA_TILING_DBG] sparseLambda=%.2f sparseMode=%ld paged=%d blockSize=%ld "
-                "numBlocks=%d maxQ=%ld\n",
-                sparseLamda, (long)sparseMode, (int)pagedCacheFlag, (long)blockSize,
-                (int)(kShape->GetStorageShape().GetDim(0)), (long)maxQSeqlen);
+        // printf("[FIA_TILING_DBG] sparseLambda=%.2f sparseMode=%ld paged=%d blockSize=%ld "
+        //         "numBlocks=%d maxQ=%ld\n",
+        //         sparseLamda, (long)sparseMode, (int)pagedCacheFlag, (long)blockSize,
+        //         (int)(kShape->GetStorageShape().GetDim(0)), (long)maxQSeqlen);
     }
 
     return ge::GRAPH_SUCCESS;
@@ -403,10 +403,10 @@ ge::graphStatus TilingVllmFusedInferAttentionScore(gert::TilingContext *context)
                OPS_LOG_E("VllmFusedInferAttentionScore", "FAInferTiling DoTiling failed"),
                return ge::GRAPH_FAILED);
 
-    printf("[FIA_TILING_POST] coreNum=%u totalTaskNum=%u firstBatchTaskNum=%u "
-            "maxNumBlocksPerBatch=%u sparseLambda=%.2f\n",
-            coreNum, faTilingData.get_totalTaskNum(), faTilingData.get_firstBatchTaskNum(),
-            (uint32_t)faTilingData.get_maxNumBlocksPerBatch(), faTilingData.get_sparseLamda());
+    // printf("[FIA_TILING_POST] coreNum=%u totalTaskNum=%u firstBatchTaskNum=%u "
+    //         "maxNumBlocksPerBatch=%u sparseLambda=%.2f\n",
+    //         coreNum, faTilingData.get_totalTaskNum(), faTilingData.get_firstBatchTaskNum(),
+    //         (uint32_t)faTilingData.get_maxNumBlocksPerBatch(), faTilingData.get_sparseLamda());
 
     faTilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(faTilingData.GetDataSize());

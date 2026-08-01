@@ -569,6 +569,30 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+// Meta implementation for npu_fused_infer_attention_score (TND layout).
+// Output shapes mirror the real kernel adapter
+// (csrc/fused_infer_attention_score/fused_infer_attention_score_torch_adpt.h):
+//   attention_out: same shape/dtype as query  [total_q, num_heads, head_dim]
+//   softmax_lse:   float32 [total_q, num_heads, 1]
+std::tuple<at::Tensor, at::Tensor> npu_fused_infer_attention_score_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const c10::optional<at::Tensor> &pse_shift,
+    const c10::optional<at::Tensor> &atten_mask,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    const c10::optional<at::Tensor> &blocktable,
+    int64_t num_heads, double scale, int64_t pre_tokens, int64_t next_tokens,
+    c10::string_view input_layout, int64_t num_key_value_heads,
+    int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
+    int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag)
+{
+    at::Tensor attention_out = at::empty_symint(query.sym_sizes(), query.options());
+    at::Tensor softmax_lse = at::empty_symint(
+        {query.sym_size(0), query.sym_size(1), 1},
+        query.options().dtype(at::kFloat));
+    return {attention_out, softmax_lse};
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -618,5 +642,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // Fused infer attention score
+    ops.impl("npu_fused_infer_attention_score", &vllm_ascend::meta::npu_fused_infer_attention_score_meta);
 }
 }
