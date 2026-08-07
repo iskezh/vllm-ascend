@@ -13,6 +13,8 @@ add_ops_compile_options(
                 -Wno-deprecated-declarations
                 -Werror
                 -fpermissive
+                -g
+                -sanitizer
 )
 
 set(fused_infer_attention_score_depends transformer/attention/fused_infer_attention_score PARENT_SCOPE)

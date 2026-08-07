@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -70,6 +72,9 @@ REGISTER_TILING_DATA_CLASS(VllmFusedInferAttentionScore_5200000000010200200, FAI
 
 struct VllmFusedInferAttentionScoreCompileInfo {};
 
+// actual_seq_lengths 虽已通过 TilingInputsDataDependency 声明 TILING_ON_HOST，
+// 但当前 EXEC_NPU_CMD(aclnn) 直发路径下框架不做 D2H 搬运（GetData 返回 device
+// 指针，host 直读会段错误，已实测验证），因此 device placement 时必须自己拷贝。
 static ge::graphStatus CopySeqLengthsToHost(const gert::Tensor *tensor, std::vector<int64_t> &hostData)
 {
     int64_t shapeSize = tensor->GetShapeSize();
@@ -96,9 +101,23 @@ static ge::graphStatus TilingPrepareForVllmFusedInferAttentionScore(gert::Tiling
     return ge::GRAPH_SUCCESS;
 }
 
+// VLLM_FIA_HOST_SEQ_TILING=0：关闭 host 侧 actual_seq_lengths 取值（不做 D2H），
+// FD/DECODING 分流同时关闭，全部走 regular FAInfer；任务总数由 kernel 在 device
+// 上按 GM 实际长度计算（devTaskMode=1）。默认（不设置或置 1）：原有行为。
+// 回退方式：unset 或设为 1。
+static bool IsHostSeqValueTilingEnabled()
+{
+    static const bool enabled = []() {
+        const char *env = std::getenv("VLLM_FIA_HOST_SEQ_TILING");
+        return (env == nullptr) || (std::string(env) != "0");
+    }();
+    return enabled;
+}
+
 static ge::graphStatus ConvertContextToFAInferContext(gert::TilingContext *context, FAInferContext &faInfo,
                                                       const std::vector<int64_t> &hostActualQSeq,
-                                                      const std::vector<int64_t> &hostActualKvSeq)
+                                                      const std::vector<int64_t> &hostActualKvSeq,
+                                                      uint32_t aicoreNum)
 {
     auto qDesc = context->GetInputDesc(FIA_QUERY_INPUT_INDEX);
     OPS_ERR_IF(qDesc == nullptr, OPS_LOG_E("VllmFusedInferAttentionScore", "query desc is nullptr"),
@@ -226,12 +245,14 @@ static ge::graphStatus ConvertContextToFAInferContext(gert::TilingContext *conte
     OPS_ERR_IF(actualQSeq->GetDataType() != ge::DT_INT64 || actualKvSeq->GetDataType() != ge::DT_INT64,
                OPS_LOG_E("VllmFusedInferAttentionScore", "actual_seq_lengths must be INT64"),
                return ge::GRAPH_FAILED);
-    OPS_ERR_IF(hostActualQSeq.empty() || hostActualKvSeq.empty(),
-               OPS_LOG_E("VllmFusedInferAttentionScore", "actual_seq_lengths host data is empty"),
-               return ge::GRAPH_FAILED);
-    const int64_t *actualSeqQ = hostActualQSeq.data();
-    const int64_t *actualSeqKv = hostActualKvSeq.data();
-    int32_t batch = static_cast<int32_t>(hostActualQSeq.size());
+    // hostSeqAvail=false（VLLM_FIA_HOST_SEQ_TILING=0，host 未做 D2H）：
+    // 不读 actual seq 的值，batch 从 shape 推导，qSeqlenList 置空，
+    // FD/DECODING 分流关闭，任务总数由 kernel 在 device 侧计算。
+    const bool hostSeqAvail = !hostActualQSeq.empty() && !hostActualKvSeq.empty();
+    const int64_t *actualSeqQ = hostSeqAvail ? hostActualQSeq.data() : nullptr;
+    const int64_t *actualSeqKv = hostSeqAvail ? hostActualKvSeq.data() : nullptr;
+    int32_t batch = hostSeqAvail ? static_cast<int32_t>(hostActualQSeq.size())
+                                 : static_cast<int32_t>(actualQSeq->GetShapeSize());
     OPS_ERR_IF(batch <= 0,
                OPS_LOG_E("VllmFusedInferAttentionScore", "invalid actual_seq_lengths size"),
                return ge::GRAPH_FAILED);
@@ -280,31 +301,63 @@ static ge::graphStatus ConvertContextToFAInferContext(gert::TilingContext *conte
     int64_t minQSeqlen = INT64_MAX;
     int64_t maxKvSeqlen = 0;
     int64_t minKvSeqlen = INT64_MAX;
-    for (int32_t b = 0; b < batch; ++b) {
-        int64_t qSeqlen = actualSeqQ[b];
-        int64_t kvSeqlen = actualSeqKv[b];
-        if (b > 0) {
-            qSeqlen -= actualSeqQ[b - 1];
-            if (!pagedCacheFlag) {
-                kvSeqlen -= actualSeqKv[b - 1];
+    if (hostSeqAvail) {
+        for (int32_t b = 0; b < batch; ++b) {
+            int64_t qSeqlen = actualSeqQ[b];
+            int64_t kvSeqlen = actualSeqKv[b];
+            if (b > 0) {
+                qSeqlen -= actualSeqQ[b - 1];
+                if (!pagedCacheFlag) {
+                    kvSeqlen -= actualSeqKv[b - 1];
+                }
             }
+            maxQSeqlen = std::max(maxQSeqlen, qSeqlen);
+            minQSeqlen = std::min(minQSeqlen, qSeqlen);
+            maxKvSeqlen = std::max(maxKvSeqlen, kvSeqlen);
+            minKvSeqlen = std::min(minKvSeqlen, kvSeqlen);
         }
-        maxQSeqlen = std::max(maxQSeqlen, qSeqlen);
-        minQSeqlen = std::min(minQSeqlen, qSeqlen);
-        maxKvSeqlen = std::max(maxKvSeqlen, kvSeqlen);
-        minKvSeqlen = std::min(minKvSeqlen, kvSeqlen);
     }
     faInfo.maxQSeqlen = static_cast<int64_t>(maxQSeqlen);
     faInfo.maxKvSeqlen = static_cast<int64_t>(maxKvSeqlen);
+    faInfo.devTaskMode = !hostSeqAvail;
 
     faInfo.flashDecodeFlag = false;
     faInfo.decodingFlag = false;
-    // The source warehouse does not hard-reject paged-cache inputs.  Allow all
-    // paged-cache cases to fall through to the generic FAInferTiling path, and
-    // only select the dedicated decoding kernel for the strict qSeqlen==1 decode
-    // case (matching the pre-migration fast-path).
-    if (pagedCacheFlag && maxQSeqlen == 1 && minQSeqlen == 1 &&
-        faInfo.maskType == MaskType::NO_MASK && !lseFlag) {
+    // Flash-decode 分发（与源仓 ConvertContextToParamsFAI 完全拉齐）：
+    // paged + 小 q + 长 KV + 任务数填不满核数时，把每个 (batch,kvHead) 的 KV 切到
+    // 多核并行计算再按 LSE 归并。KV 长度一律取 batch 内最小值（minKvSeqlen）。
+    // hostSeqAvail=false 时保持关闭（devTaskMode 下统一走 regular）。
+    if (hostSeqAvail) {
+        constexpr int64_t FD_GROUP_SIZE_MAX = 128;        // GROUP_SIZE_128
+        constexpr int64_t FD_MAX_Q_SEQLEN = 16;           // QUERY_ACTUAL_SEQ_LEN_16
+        constexpr int64_t FD_MIN_KV_SEQLEN = 1024;        // KV_ACTUAL_SEQ_LEN_1024
+        constexpr int64_t FD_KV_PER_CORE = 512;           // isLongSeq: minKV >= aicoreNum * 512
+        constexpr int32_t FD_EMBEDDING_SIZE_MAX = 128;    // EMBEDDING_SIZE_128
+        uint32_t numTasks = static_cast<uint32_t>(batch) * static_cast<uint32_t>(faInfo.kvHeads);
+        bool isLongSeq = (numTasks <= 0.8 * aicoreNum) &&
+                         (minKvSeqlen >= static_cast<int64_t>(aicoreNum) * FD_KV_PER_CORE);
+        bool isShortSeq = (numTasks <= 0.4 * aicoreNum) && (minKvSeqlen >= FD_MIN_KV_SEQLEN);
+        if (pagedCacheFlag && !lseFlag &&
+            faInfo.maskType != MaskType::FULL_MASK && faInfo.maskType != MaskType::SWA_MASK &&
+            !faInfo.learnableSinkFlag &&
+            faInfo.innerPrecise != 1 &&
+            (faInfo.embeddingSize <= FD_EMBEDDING_SIZE_MAX) &&
+            (maxQSeqlen * (faInfo.numHeads / faInfo.kvHeads) <= FD_GROUP_SIZE_MAX) &&
+            (maxQSeqlen <= FD_MAX_Q_SEQLEN) &&
+            (minKvSeqlen >= FD_MIN_KV_SEQLEN) &&
+            (minQSeqlen > 0) &&
+            (isLongSeq || isShortSeq)) {
+            faInfo.flashDecodeFlag = true;
+        }
+    }
+    // Decoding 快路径判定（与源仓 ConvertContextToParamsFAI 完全拉齐）：
+    // 仅在严格 decode（qSeqlen==1）+ 任务数足够填核 + blockSize==128 + GQA 组大小
+    // 受限时才走专用 decoding kernel，其余 paged 场景回退通用 FAInfer 路径。
+    if (hostSeqAvail && pagedCacheFlag && maxQSeqlen == 1 && minQSeqlen == 1 &&
+        faInfo.maskType == MaskType::NO_MASK &&
+        (batch >= static_cast<int32_t>(aicoreNum)) && (faInfo.blockSize == 128) &&
+        !lseFlag && !faInfo.learnableSinkFlag && (faInfo.innerPrecise == 0) &&
+        ((faInfo.numHeads / faInfo.kvHeads) <= 128)) {
         faInfo.decodingFlag = true;
     }
 
@@ -339,19 +392,14 @@ static ge::graphStatus ConvertContextToFAInferContext(gert::TilingContext *conte
                   key, faInfo.pagedCacheFlag, faInfo.decodingFlag, faInfo.flashDecodeFlag,
                   static_cast<int>(faInfo.maskType), faInfo.lseFlag, maxQSeqlen, minQSeqlen, minKvSeqlen,
                   faInfo.layout.c_str(), static_cast<int>(faInfo.dataType), sparseLamda);
-        for (int32_t b = 0; b < batch; ++b) {
+        for (int32_t b = 0; hostSeqAvail && b < batch; ++b) {
             int64_t ql = actualSeqQ[b];
             int64_t kvl = actualSeqKv[b];
             if (b > 0) {
                 ql -= actualSeqQ[b - 1];
                 if (!pagedCacheFlag) kvl -= actualSeqKv[b - 1];
             }
-            // printf("[FIA_TILING_DBG] batch[%d] qlen=%ld kvlen=%ld\n", b, (long)ql, (long)kvl);
         }
-        // printf("[FIA_TILING_DBG] sparseLambda=%.2f sparseMode=%ld paged=%d blockSize=%ld "
-        //         "numBlocks=%d maxQ=%ld\n",
-        //         sparseLamda, (long)sparseMode, (int)pagedCacheFlag, (long)blockSize,
-        //         (int)(kShape->GetStorageShape().GetDim(0)), (long)maxQSeqlen);
     }
 
     return ge::GRAPH_SUCCESS;
@@ -381,15 +429,19 @@ ge::graphStatus TilingVllmFusedInferAttentionScore(gert::TilingContext *context)
     OPS_ERR_IF(actualQSeqTensor == nullptr || actualKvSeqTensor == nullptr,
                OPS_LOG_E("VllmFusedInferAttentionScore", "actual_seq_lengths tensors are required"),
                return ge::GRAPH_FAILED);
-    auto ret = CopySeqLengthsToHost(actualQSeqTensor, hostActualQSeq);
-    if (ret != ge::GRAPH_SUCCESS) {
-        return ret;
+    ge::graphStatus ret = ge::GRAPH_SUCCESS;
+    if (IsHostSeqValueTilingEnabled()) {
+        ret = CopySeqLengthsToHost(actualQSeqTensor, hostActualQSeq);
+        if (ret != ge::GRAPH_SUCCESS) {
+            return ret;
+        }
+        ret = CopySeqLengthsToHost(actualKvSeqTensor, hostActualKvSeq);
+        if (ret != ge::GRAPH_SUCCESS) {
+            return ret;
+        }
     }
-    ret = CopySeqLengthsToHost(actualKvSeqTensor, hostActualKvSeq);
-    if (ret != ge::GRAPH_SUCCESS) {
-        return ret;
-    }
-    ret = ConvertContextToFAInferContext(context, faInfo, hostActualQSeq, hostActualKvSeq);
+    // else: VLLM_FIA_HOST_SEQ_TILING=0，host 不做 D2H，走 devTaskMode（kernel device 侧算任务数）
+    ret = ConvertContextToFAInferContext(context, faInfo, hostActualQSeq, hostActualKvSeq, coreNum);
     if (ret != ge::GRAPH_SUCCESS) {
         return ret;
     }
@@ -403,11 +455,6 @@ ge::graphStatus TilingVllmFusedInferAttentionScore(gert::TilingContext *context)
                OPS_LOG_E("VllmFusedInferAttentionScore", "FAInferTiling DoTiling failed"),
                return ge::GRAPH_FAILED);
 
-    // printf("[FIA_TILING_POST] coreNum=%u totalTaskNum=%u firstBatchTaskNum=%u "
-    //         "maxNumBlocksPerBatch=%u sparseLambda=%.2f\n",
-    //         coreNum, faTilingData.get_totalTaskNum(), faTilingData.get_firstBatchTaskNum(),
-    //         (uint32_t)faTilingData.get_maxNumBlocksPerBatch(), faTilingData.get_sparseLamda());
-
     faTilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(faTilingData.GetDataSize());
 
@@ -417,10 +464,18 @@ ge::graphStatus TilingVllmFusedInferAttentionScore(gert::TilingContext *context)
                return ge::GRAPH_FAILED);
     workspaces[0] = static_cast<size_t>(16U * 1024U * 1024U) +
                     static_cast<size_t>(faTiling.GetCoreNum()) * WORKSPACE_BLOCK_SIZE_DB * 4U * 3U * 4U +
+                    static_cast<size_t>(faTiling.GetCoreNum()) * 2U * 32U * (PRELANCH_NUM + 1U) +
                     static_cast<size_t>(faTilingData.get_splitLseTotalSize()) +
                     static_cast<size_t>(faTilingData.get_splitOTotalSize());
 
-    context->SetBlockDim(faTiling.GetCoreNum());
+    // FD 模式下按 tiling 计算的 needCoreNum 启动核数（对齐参考实现 :1645-1651），
+    // 否则 CombineScale 的跨核归并会读到未参与计算的核
+    if (faInfo.flashDecodeFlag) {
+        uint32_t needCoreNum = faTilingData.get_needCoreNum();
+        context->SetBlockDim(needCoreNum == 0U ? faTiling.GetCoreNum() : needCoreNum);
+    } else {
+        context->SetBlockDim(faTiling.GetCoreNum());
+    }
     context->SetTilingKey(faTiling.GetTilingKey());
 
     return ge::GRAPH_SUCCESS;

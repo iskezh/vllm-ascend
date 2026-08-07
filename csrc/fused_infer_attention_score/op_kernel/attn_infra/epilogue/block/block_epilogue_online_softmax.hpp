@@ -193,16 +193,16 @@ public:
     }
 
     __aicore__ inline
-    void StoreSpFlagResIntoHmb(AscendC::GlobalTensor<uint8_t> gSpNew, uint32_t gmOffsetSp, bool printFlag = false)
+    void StoreSpFlagResIntoHmb(AscendC::GlobalTensor<uint8_t> gSpNew, uint32_t gmOffsetSp)
     {
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID1);
-        tempSpUb[MAX_UB_S_ELEM_NUM].SetValue(0, sp_flag);
+        // tempSpUb[MAX_UB_S_ELEM_NUM].SetValue(0, sp_flag);
         AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::DataCopyPad(
-            gSpNew[gmOffsetSp],
-            tempSpUb[MAX_UB_S_ELEM_NUM],
-            AscendC::DataCopyParams(1, 1 * sizeof(uint8_t), 0, 0));
+        // AscendC::DataCopyPad(
+        //     gSpNew[gmOffsetSp],
+        //     tempSpUb[MAX_UB_S_ELEM_NUM],
+        //     AscendC::DataCopyParams(1, 1 * sizeof(uint8_t), 0, 0));
         AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID2);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID2);
     }
@@ -820,8 +820,6 @@ public:
 
                 float dm_val = dmUbTensor[dmUbOffsetCurCycle].GetValue(0);
                 bool spRes = dm_val < sparseLamda;
-                // AscendC::printf("[SP-DM] dm=%.6f ro=%u isF=%u spRes=%u\n",
-                //     dm_val, rowOffset, isFirstStackTile, (uint32_t)spRes);
                 if ((!isFirstStackTile) && (spRes == 1)) {
                     *sp_flag_temp = 1;
 
@@ -887,7 +885,7 @@ public:
     __aicore__ inline
     void UpdateGlobalRowMax(AscendC::GlobalTensor<ElementSink> gSink, uint32_t rowNumCurLoop, uint32_t rowNumCurLoopRound, uint32_t columnNum,
         uint32_t columnNumRound, uint32_t dmUbOffsetCurCycle, uint32_t rowOffset, uint32_t isFirstStackTile, bool isLastStackTile, SinkLoopParam &curLoop,
-        uint32_t pingpongFlag, uint8_t* sp_flag_temp, bool printFlag)
+        uint32_t pingpongFlag, uint8_t* sp_flag_temp)
     {
         if (isFirstStackTile) {
             AscendC::DataCopy(
@@ -930,8 +928,6 @@ public:
 
                 float dm_val = dmUbTensor[dmUbOffsetCurCycle].GetValue(0);
                 bool spRes = dm_val < sparseLamda;
-                // AscendC::printf("[SP-DM] dm=%.6f ro=%u isF=%u spRes=%u\n",
-                //     dm_val, rowOffset, isFirstStackTile, (uint32_t)spRes);
                 if ((!isFirstStackTile) && (spRes == 1)) {
                     *sp_flag_temp = 1;
 
@@ -1296,8 +1292,7 @@ public:
         uint32_t rowOffset, uint32_t isFirstStackTile, uint32_t isLastNoMaskStackTile,
         uint32_t isFirstRowLoop, uint32_t isLastRowLoop,
         uint32_t columnNumRound, uint32_t pingpongFlag,
-        uint32_t curStackTileMod, SinkLoopParam& sinkLoopParam, bool isLastStackTile, bool isSplitKV, bool startsWithMaskThenNomaskFlag,
-        bool printFlag)
+        uint32_t curStackTileMod, SinkLoopParam& sinkLoopParam, bool isLastStackTile, bool isSplitKV, bool startsWithMaskThenNomaskFlag)
     {
         uint32_t rowNumCurLoop = layoutOutput.shape(0);
         uint32_t rowNumCurLoopRound = NpuArch::Detail::Alignment::RoundUp(rowNumCurLoop, FLOAT_BLOCK_SIZE);
@@ -1328,11 +1323,9 @@ public:
             isLastStackTile,
             sinkLoopParam,
             pingpongFlag,
-            &sp_flag_temp,
-            printFlag);
+            &sp_flag_temp);
 
         if (sp_flag_temp == 1) {
-            // AscendC::printf("[SP-SKIP] SubCoreCompute sparse skip! rowOff=%u\n", rowOffset);
              AscendC::Duplicate<float, false>(
                 lsUbTensor[sUbOffset], 0.0f, (uint64_t)0, 
                 NpuArch::Detail::Alignment::CeilDiv(rowNumCurLoop * columnNumRound, FLOAT_VECTOR_SIZE),
@@ -1346,7 +1339,9 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(pingpongFlag);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(pingpongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(pingpongFlag);
+            
             CopyPUbToGm(gOutput, sUbOffset, rowNumCurLoop, columnNumRound, columnNumPad);
+            
             if constexpr (!doTriUMask) {
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(pingpongFlag);
                 if (isLastNoMaskStackTile && isLastRowLoop) {
@@ -1562,7 +1557,9 @@ public:
         rowNumTile = AscendC::Std::min(rowNumTile, FLOAT_VECTOR_SIZE);
         uint32_t rowLoopNum = NpuArch::Detail::Alignment::CeilDiv(rowActualThisSubBlock, rowNumTile);
         uint32_t preLoad = 1;
-
+        
+        sp_flag = 0;
+        
         for (uint32_t rowLoopIdx = 0; rowLoopIdx < rowLoopNum + preLoad; rowLoopIdx++) {
             if (rowLoopIdx < rowLoopNum) {
                 uint32_t pingpongFlag = rowLoopIdx % 2;
@@ -1617,7 +1614,7 @@ public:
         const LayoutOutput &layoutOutput, const LayoutInput &layoutInput, GemmCoord actualBlockShape,
         uint32_t isFirstStackTile, uint32_t isLastNoMaskStackTile, uint32_t qSBlockSize, uint32_t qNBlockSize,
         uint32_t curStackTileMod, bool isLastStackTile, bool isSplitKV = false, bool startsWithMaskTile = false,
-        bool startsWithMaskThenNomaskFlag = false, bool printFlag = false)
+        bool startsWithMaskThenNomaskFlag = false)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t columnNum = actualBlockShape.n();
@@ -1647,6 +1644,7 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID1);
         }
         sp_flag_arr = 0;
+        sp_flag = 0;
         
         for (uint32_t rowLoopIdx = 0; rowLoopIdx < rowLoopNum + preLoad; rowLoopIdx++) {
             if (rowLoopIdx < rowLoopNum) {
@@ -1700,8 +1698,7 @@ public:
                     curSinkLoop,
                     isLastStackTile,
                     isSplitKV,
-                    startsWithMaskThenNomaskFlag,
-                    printFlag);
+                    startsWithMaskThenNomaskFlag);
             }
         }
     }
@@ -1711,7 +1708,7 @@ public:
         AscendC::GlobalTensor<uint8_t> gSp, AscendC::GlobalTensor<ElementMask> gMask, const LayoutOutput &layoutOutput, const LayoutInput &layoutInput,
         const LayoutInput &layoutMask, GemmCoord actualBlockShape, uint32_t isFirstStackTile, uint32_t qSBlockSize,
         uint32_t qNBlockSize, uint32_t curStackTileMod, Arch::CrossCoreFlag qkReady, uint32_t triUp, uint32_t triDown,
-        uint32_t kvSStartIdx, uint32_t kvSEndIdx, bool isLastStackTile, bool isSplitKV = false, bool printFlag = false)
+        uint32_t kvSStartIdx, uint32_t kvSEndIdx, bool isLastStackTile, bool isSplitKV = false)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t columnNum = actualBlockShape.n();
@@ -1763,21 +1760,17 @@ public:
         rowNumTile = AscendC::Std::min(rowNumTile, FLOAT_VECTOR_SIZE);
         uint32_t rowLoopNum = NpuArch::Detail::Alignment::CeilDiv(rowActualThisSubBlock, rowNumTile);
         uint32_t preLoad = 1;
-        if (rowLoopNum > 0) {
-            sp_flag = 1;
-        } else {
-            sp_flag = 0;
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID1);
-        }
-        sp_flag_arr = 0;
         if (rowActualThisSubBlock == 0) {
             sp_flag = 0;
+            sp_flag_arr = 0;
             AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID1);
             Arch::CrossCoreWaitFlag(qkReady);
             return;
         }
         sp_flag = 1;
-
+        sp_flag_arr = 0;
+        sp_flag = 0;
+        
         for (uint32_t rowLoopIdx = 0; rowLoopIdx < rowLoopNum + preLoad; rowLoopIdx++) {
             if (rowLoopIdx < rowLoopNum) {
                 uint32_t pingpongFlag = rowLoopIdx % 2;
@@ -1876,8 +1869,7 @@ public:
                     curSinkLoop,
                     isLastStackTile,
                     isSplitKV,
-                    false,
-                    printFlag);
+                    false);
             }
         }
     }
@@ -1888,8 +1880,7 @@ public:
         const LayoutInput &layoutMask, GemmCoord actualBlockShape, uint32_t isFirstStackTile, uint32_t qSBlockSize,
         uint32_t qNBlockSize, uint32_t curStackTileMod, Arch::CrossCoreFlag qkReady,
         int32_t kvSStartIdx, bool doTriUPreMask,  bool doTriUNextMask, int32_t preTokenStartLen,
-        int32_t preTokenEndLen, int32_t nextTokenStartLen, int32_t nextTokenEndLen, bool isLastStackTile,
-        bool printFlag = false)
+        int32_t preTokenEndLen, int32_t nextTokenStartLen, int32_t nextTokenEndLen, bool isLastStackTile)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t columnNum = actualBlockShape.n();
@@ -1964,6 +1955,7 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID1);
         }
         sp_flag_arr = 0;
+        sp_flag = 0;
 
         if (rowActualThisSubBlock == 0) {
             Arch::CrossCoreWaitFlag(qkReady);
@@ -2134,8 +2126,7 @@ public:
                     curSinkLoop,
                     isLastStackTile,
                     false,
-                    false,
-                    printFlag);
+                    false);
             }
         }
     }
@@ -2146,8 +2137,7 @@ public:
         const LayoutOutput &layoutOutput, const LayoutInput &layoutInput,
         const LayoutInput &layoutMask, GemmCoord actualBlockShape, uint32_t isFirstStackTile, uint32_t qSBlockSize,
         uint32_t qNBlockSize, uint32_t curStackTileMod, Arch::CrossCoreFlag qkReady, uint32_t rowOffer, uint32_t kvSStartIdx,
-        uint32_t kvSEndIdx, uint32_t qNStartIdx, uint32_t BIdx, uint32_t qHeads, int64_t pseQ, int64_t pseKv, bool isLastStackTile,
-        bool printFlag = false)
+        uint32_t kvSEndIdx, uint32_t qNStartIdx, uint32_t BIdx, uint32_t qHeads, int64_t pseQ, int64_t pseKv, bool isLastStackTile)
     {
          uint32_t rowNum = actualBlockShape.m();   //当前fullmask块的总行数
          uint32_t columnNum = actualBlockShape.n();  //fullmask块的总列数
@@ -2183,7 +2173,8 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID1);
         }
          sp_flag_arr = 0;
- 
+         sp_flag = 0;
+        
          if (rowActualThisSubBlock == 0) {
              Arch::CrossCoreWaitFlag(qkReady);
              return;
@@ -2260,8 +2251,7 @@ public:
                     curSinkLoop,
                     isLastStackTile,
                     false,
-                    false,
-                    printFlag);
+                    false);
                 if (rowLoopIdx < rowLoopNum) {
                     uint32_t rowOffsetCurLoop = rowLoopIdx * rowNumTile;
                     uint32_t rowNumCurLoop =

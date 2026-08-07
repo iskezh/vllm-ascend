@@ -434,7 +434,7 @@ namespace SplitFuse {
                             (stackSeqCount - PRE_LAUNCH == 0),
                             nowkvSIdx + blockStackNum >= kvSLoopNumTotal,
                             curStackTileMod,
-                            1U, 0, 0, 0U, false);
+                            1U, 0, 0);
 #endif
                     }
                     stackSeqCount++;
@@ -679,7 +679,7 @@ namespace SplitFuse {
                                 (stackSeqCount - PRE_LAUNCH == 0),
                                 nowkvSIdx + blockStackNum >= kvSLoopNumTotal,
                                 curStackTileMod,
-                                1U, 0, 0, 0U, false);
+                                1U, 0, 0);
 #endif
                         }
                         stackSeqCount++;

@@ -1,0 +1,18 @@
+dump=fia_layer20_rank0_decode_bigdiff_occ0.pt snap=fia_bigdiff_outputs_pid22312_model_layers_20_self_attn_attn.pt
+q_stride(meta)=[1024, 128, 1] q_contiguous=True bt_meta={'orig_shape': [10, 704], 'orig_stride': [704, 1], 'orig_contiguous': True, 'raw': True}
+[online_custom vs offline_custom] bitdiff=285/10240 ulp>=5:133 max_abs=5.2893e-01
+    per-head max: h0=2.441e-04 h1=0.000e+00 h2=6.104e-05 h3=5.289e-01 h4=3.052e-05 h5=9.766e-04 h6=9.766e-04 h7=2.980e-08
+    per-head any-bitdiff: [True, False, True, True, True, True, True, True]
+[online_base   vs offline_base  ] bitdiff=0/10240 ulp>=5:0 max_abs=0.0000e+00
+    per-head max: h0=0.000e+00 h1=0.000e+00 h2=0.000e+00 h3=0.000e+00 h4=0.000e+00 h5=0.000e+00 h6=0.000e+00 h7=0.000e+00
+    per-head any-bitdiff: [False, False, False, False, False, False, False, False]
+[online_custom vs online_base   ] bitdiff=285/10240 ulp>=5:133 max_abs=5.2893e-01
+    per-head max: h0=2.441e-04 h1=0.000e+00 h2=6.104e-05 h3=5.289e-01 h4=3.052e-05 h5=9.766e-04 h6=9.766e-04 h7=2.980e-08
+    per-head any-bitdiff: [True, False, True, True, True, True, True, True]
+[offline_custom vs offline_base ] bitdiff=0/10240 ulp>=5:0 max_abs=0.0000e+00
+    per-head max: h0=0.000e+00 h1=0.000e+00 h2=0.000e+00 h3=0.000e+00 h4=0.000e+00 h5=0.000e+00 h6=0.000e+00 h7=0.000e+00
+    per-head any-bitdiff: [False, False, False, False, False, False, False, False]
+[online_custom vs offline_base  ] bitdiff=285/10240 ulp>=5:133 max_abs=5.2893e-01
+    per-head max: h0=2.441e-04 h1=0.000e+00 h2=6.104e-05 h3=5.289e-01 h4=3.052e-05 h5=9.766e-04 h6=9.766e-04 h7=2.980e-08
+    per-head any-bitdiff: [True, False, True, True, True, True, True, True]
+online_custom 逐 token maxdiff: t0=0.000e+00 t1=3.815e-06 t2=1.221e-04 t3=2.441e-04 t4=9.766e-04 t5=1.953e-03 t6=3.052e-05 t7=3.815e-06 t8=2.441e-04 t9=5.289e-01

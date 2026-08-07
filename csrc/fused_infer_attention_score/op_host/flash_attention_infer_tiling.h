@@ -79,6 +79,8 @@ namespace optiling{
     TILING_DATA_FIELD_DEF(uint32_t, tailStartBatch)
     TILING_DATA_FIELD_DEF(uint32_t, tailStartN2)
     TILING_DATA_FIELD_DEF(uint32_t, tailKvNBlockTile)
+    // 1 = kernel 在 device 侧自行计算 firstBatchTaskNum/totalTaskNum（host 未读 seq 值）
+    TILING_DATA_FIELD_DEF(uint32_t, devTaskMode)
     TILING_DATA_FIELD_DEF_STRUCT(coreNode, coreInfo)
     TILING_DATA_FIELD_DEF_STRUCT(splitNode, splitInfo)
     END_TILING_DATA_DEF
@@ -148,6 +150,9 @@ namespace optiling{
         bool isTilingSink = false;
         bool flashDecodeFlag = false;
         bool decodingFlag = false;
+        // true = host 不读取 actual_seq_lengths 的值（VLLM_FIA_HOST_SEQ_TILING=0）：
+        // FD/DECODING 分流关闭，任务总数由 kernel 在 device 侧按 GM 实际长度计算。
+        bool devTaskMode = false;
         std::string layout;
     };
 
@@ -241,11 +246,6 @@ namespace optiling{
         faTilingData.set_scaleValue(faInfo_.scaleValue);
         faTilingData.set_sparseLamda(faInfo_.sparseLamda);
         faTilingData.set_sparseMode(faInfo_.sparseMode);
-        // printf("[FIA_TILING_BASIC] sparseLambda=%.2f sparseMode=%d numHeads=%d kvHeads=%d "
-        //         "batch=%d maxQ=%ld maxKV=%ld numBlocks=%d blockSize=%d paged=%d\n",
-        //         faInfo_.sparseLamda, faInfo_.sparseMode, faInfo_.numHeads, faInfo_.kvHeads,
-        //         faInfo_.batch, (long)faInfo_.maxQSeqlen, (long)faInfo_.maxKvSeqlen,
-        //         faInfo_.numBlocks, faInfo_.blockSize, (int)faInfo_.pagedCacheFlag);
         faTilingData.set_preToken(static_cast<int64_t>(faInfo_.preToken));
         faTilingData.set_nextToken(static_cast<int64_t>(faInfo_.nextToken));
         faTilingData.set_pseQ(faInfo_.pseQ);
@@ -328,8 +328,6 @@ namespace optiling{
         }
         uint64_t spFlagSize = static_cast<uint64_t>(blockNum_) * 2 * 32 * (PRELANCH_NUM + 1);
         uint64_t workSpaceSize = mm1OutSize + smOnlineOutSize + mm2OutSize + UpdateSize + spFlagSize + splitLseTotalSize + splitOTotalSize;
-        // printf("[TILING-WS] blockNum=%u spFlagSize=%lu workSpaceSize=%lu\n",
-        //     blockNum_, spFlagSize, workSpaceSize);
         faTilingData.set_mm1OutSize(mm1OutSize);
         faTilingData.set_smOnlineOutSize(smOnlineOutSize);
         faTilingData.set_mm2OutSize(mm2OutSize);
@@ -682,13 +680,21 @@ namespace optiling{
     {
         FillBasicTilingData(tilingdata);
         if (!faInfo_.isTilingSink) {
-            FillSplitCoreTilingData(tilingdata);
-            if (faInfo_.flashDecodeFlag) {
-                splitBN2S1GS2(tilingdata);
-            } else if (faInfo_.decodingFlag) {
-                SplitCoreDecodeBS1GN2(tilingdata);
+            if (faInfo_.devTaskMode) {
+                // host 未读 actual seq 值：FD/DECODING 分流关闭，统一走 regular
+                // 路径；任务总数由 kernel 在 device 侧计算，这里填 0 占位。
+                tilingdata.set_firstBatchTaskNum(0);
+                tilingdata.set_totalTaskNum(0);
+            } else {
+                FillSplitCoreTilingData(tilingdata);
+                if (faInfo_.flashDecodeFlag) {
+                    splitBN2S1GS2(tilingdata);
+                } else if (faInfo_.decodingFlag) {
+                    SplitCoreDecodeBS1GN2(tilingdata);
+                }
             }
         }
+        tilingdata.set_devTaskMode(faInfo_.devTaskMode ? 1U : 0U);
         FillWorkSpaceTilingData(tilingdata);
         return ge::GRAPH_SUCCESS;
     }

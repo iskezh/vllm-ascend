@@ -184,7 +184,7 @@ public:
         uint32_t rowSplitSubBlock,
         LayoutA layoutA, LayoutB layoutB, LayoutC layoutC, GemmCoord actualOriShape,
         uint32_t &nIdx, uint32_t &nLoop, uint32_t &blockSize, uint32_t kvSeqlen, uint32_t strideKV,
-        uint32_t blockStackNum, Arch::CrossCoreFlag softmaxFlag, Arch::CrossCoreFlag pvReady, bool printFlag, uint32_t targetRow)
+        uint32_t blockStackNum, Arch::CrossCoreFlag softmaxFlag, Arch::CrossCoreFlag pvReady)
     {
         uint32_t rowNum = actualOriShape[COORD_DIM0];
         uint32_t embed = actualOriShape[COORD_DIM1];
@@ -226,6 +226,7 @@ public:
         uint8_t sp_flag1 = gSp.GetValue(0);
         uint8_t sp_flag2 = gSp.GetValue(32);
         bool sp_flag_res = sp_flag1 == 1 && sp_flag2 == 1;
+        sp_flag_res = false;
         countNum++;
         if (sp_flag_res) {
             sparseNum++;

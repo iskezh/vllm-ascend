@@ -88,6 +88,80 @@ _glse_dumped_target_layers = set()  # 已 dump 的 target layer
 _fia_branch_logged_layers: set[str] = set()
 # 控制 chunked_prefill dense 算子的单算子复现 dump（仅一次）
 _dumped_chunked_prefill_dense = False
+
+# ---- FIA 单算子复现 dump（debug，配置写死，需要时直接改这里） ----
+_FIA_DUMP_ENABLE = True
+_FIA_DUMP_DIR = "/home/z00603376/blasst_model/kvcomp/blasst_res/attention_dumps_v2"
+_FIA_DUMP_LAYERS = {0, 30, 63}   # 首/中/尾层
+_FIA_DUMP_SKIP = 1               # 每个 (layer, stage) 组合跳过前 N 次（避开 warmup/profile）
+_FIA_DUMP_COUNT = 1              # 跳过后再 dump N 次
+_fia_dump_counter: dict = {}     # (layer_id, stage) -> 已出现次数
+# NaN 陷阱：attn_output 首次出现 NaN 的层立即 dump（不受 _FIA_DUMP_LAYERS 限制，
+# 每层只 dump 第一次），用于定位 NaN 起源层
+_FIA_DUMP_ON_NAN = True
+_fia_nan_dumped_layers: set = set()
+# A/B 双跑对比：custom 先跑到临时 buffer，baseline 跑正式 output 并继续前传。
+# custom 即使 NaN 也不污染残差流；每次调用对比两边 NaN，不一致即打印。
+# False = custom 直接写正式 output 前传（纯 chunk prefill 已验证 100% bit 一致，真实投产形态）
+_FIA_AB_COMPARE = True
+# 全场景 A/B 采样模式：True 时 _can_use_custom_fia 放行所有 state（decode-only/混合/
+# 纯 chunk 都进 custom 分支做 A/B 双跑），配合 _FIA_AB_STAGE_DUMP 抓三组对比数据。
+# 仅定位用，投产必须 False。
+_FIA_AB_ALL_STAGES = True
+# 分场景采样 dump：decode-only / 混合 batch / 纯 chunk 各抓第一组（输入+双输出），
+# 用于三场景单算子复现。每场景每进程限 1 次（首个遇到的层）。
+_FIA_AB_STAGE_DUMP = True
+_fia_stage_dumped: set = set()
+_fia_ab_nan_events: list = []   # [(layer_name, stage, nt, nan_c, nan_b, maxdiff)]
+# 数值对比聚合：stage -> dict；ulp 直方图桶 = [<1, 1, 2, 3, 4, >=5]
+_fia_ab_stats: dict = {}
+_FIA_AB_STAT_EVERY = 512      # 每 stage 每 N 次调用打印一次聚合汇总
+_FIA_AB_REL_ALERT = 1e-2      # 非 NaN 调用 max_rel 超阈值即时告警
+# 大差异陷阱：decode 调用 AB max_abs 超阈值即 dump 单算子复现数据（全局限 N 次/进程，
+# 正常 ulp 噪声 max_abs<=0.06，线上坏 tile 为 38~85，阈值取 0.5）
+_FIA_AB_BIGDIFF_DUMP = True
+_FIA_AB_BIGDIFF_THRESH = 0.5
+_FIA_AB_BIGDIFF_MAX = 2
+_fia_bigdiff_dump_count = 0
+# 保真 dump 模式：True 时 stage/bigdiff dump 整池 KV + 原始 block_table 原样落盘
+# （不做 block 压缩 remap —— 压缩会丢掉陈旧列/原始池状态，恰好抹掉越读现场）。
+# 每份约 2*num_blocks*block_size*num_kv_heads*head_size*2B（当前配置 ~728MB），
+# 仅 stage dump(3 场景) 和 bigdiff dump(限 N 次) 走 raw；NaN-trap 逐层 dump 仍走
+# 压缩模式，避免 64 层 × 8 rank 整池爆盘。
+_FIA_DUMP_RAW = True
+# 混合 batch grab 模式：True 时 _can_use_custom_fia 放行混合 batch 进 A/B 分支，
+# 在跑任何 custom 算子之前先 raw dump 完整输入（崩溃也保留现场）。
+_FIA_AB_MIXED_GRAB = True
+# 混合 batch 是否线上跑 custom：custom regular kernel 在混合 batch 上曾致 worker
+# 设备侧崩溃（20260803-194454 run），定位期一律 False —— 只抓输入 + baseline 输出，
+# custom 行为靠离线单算子复现。
+_FIA_AB_MIXED_RUN_CUSTOM = False
+# 真实前传分场景路由（投产形态验证）：逗号分隔子集 {decode, chunk, mixed}，
+# 仅列出的场景走 custom 真实输出，其余全部 baseline。设置后自动关闭 A/B 双跑
+# 与各类 dump（真实路径，custom 写正式 output 继续前传）。
+# 例：VLLM_ASCEND_FIA_CUSTOM_STAGES=decode  =>  chunk/mixed 走基线、decode 走 custom。
+# 默认 "decode,chunk"：decode 与纯 chunk prefill 均走 custom（混合 batch 仍 baseline）。
+_FIA_CUSTOM_STAGES = {
+    s.strip() for s in os.environ.get("VLLM_ASCEND_FIA_CUSTOM_STAGES", "decode,chunk").split(",")
+    if s.strip()
+}
+# A/B 角色反转：与 _FIA_CUSTOM_STAGES 配合，custom 写正式 output 前传，
+# baseline 跑临时 buffer 仅做对比统计（DIFF/STAT 日志照常，dump 仍关闭）。
+# 默认开启：STAGES 内场景 output 以 custom 为准，baseline 仅对比。
+_FIA_AB_LOG = os.environ.get("VLLM_ASCEND_FIA_AB_LOG", "1") == "1"
+if _FIA_CUSTOM_STAGES:
+    _FIA_AB_ALL_STAGES = False
+    _FIA_AB_STAGE_DUMP = False
+    # BIGDIFF 陷阱保留开启：STAGES 模式下仍抓大差异 batch 的完整输入做离线复现。
+    # 注意 _FIA_DUMP_ENABLE 必须保持 True —— _fia_repro_dump 入口强制检查它，
+    # 否则 BIGDIFF 的 force dump 会被静默跳过（20260806 101328 run 曾因此只落了
+    # outputs 小文件、丢了输入复现包）。NaN/STAGE dump 仍由各自开关保持关闭。
+    _FIA_DUMP_ENABLE = True
+    _FIA_DUMP_ON_NAN = False
+    _FIA_AB_COMPARE = _FIA_AB_LOG
+    _FIA_AB_CUSTOM_REAL = _FIA_AB_LOG
+else:
+    _FIA_AB_CUSTOM_REAL = False
 logger = logging.getLogger(__name__)
 
 # print(f"[FIA_BRANCH] attention_v1 module loaded: _USE_CUSTOM_FIA={_USE_CUSTOM_FIA}", flush=True)
@@ -301,6 +375,151 @@ def _dump_chunked_prefill_dense_inputs(layer_name, stage, sparseblock, totalbloc
         pass
 
 
+def _fia_repro_dump(layer_name, stage, num_tokens, attn_output, query, key,
+                    value, atten_mask, actual_seq_lengths_q,
+                    actual_seq_lengths_kv, block_table, num_heads,
+                    num_kv_heads, scale, sparse_mode, pre_tokens, next_tokens,
+                    block_size, sparse_lambda, enable_lse_flag,
+                    force=False, tag="", raw=False):
+    """Dump custom-FIA 算子输入，供 run_dump_repro.py(格式A) 离线复现对比。
+
+    - 每个 (_FIA_DUMP_LAYERS 中的 layer, stage) 组合：跳过前 _FIA_DUMP_SKIP 次，
+      再 dump _FIA_DUMP_COUNT 次。force=True 时跳过过滤与计数（NaN 陷阱用）。
+    - raw=False（默认）：paged 路径对 KV cache 做 block 压缩重映射，只保留本 batch
+      实际引用的 block —— 但这会丢掉陈旧列与原始池状态，恰好抹掉越读现场。
+    - raw=True（保真模式，stage/bigdiff dump 用）：整池 KV + 原始 block_table
+      原样落盘，不做任何 remap，完整保留陈旧列/垃圾块等越读触发条件。
+      attn_output 允许为 None（pre-op dump，输出见 fia_stage_outputs_*.pt）。
+    """
+    if not _FIA_DUMP_ENABLE:
+        return
+    import re
+    m = re.search(r"layers\.(\d+)", layer_name)
+    if not m:
+        return
+    layer_id = int(m.group(1))
+    combo = (layer_id, stage)
+    seen = _fia_dump_counter.get(combo, 0)
+    if not force:
+        if layer_id not in _FIA_DUMP_LAYERS:
+            return
+        _fia_dump_counter[combo] = seen + 1
+        if seen < _FIA_DUMP_SKIP or seen >= _FIA_DUMP_SKIP + _FIA_DUMP_COUNT:
+            return
+
+    try:
+        os.makedirs(_FIA_DUMP_DIR, exist_ok=True)
+        try:
+            from vllm.distributed.parallel_state import get_tp_group
+            tp_rank = get_tp_group().rank_in_group
+        except Exception:
+            tp_rank = os.getpid()
+
+        def _cpu(t):
+            return t.detach().cpu() if isinstance(t, torch.Tensor) else t
+
+        akv_list = (actual_seq_lengths_kv.detach().cpu().tolist()
+                    if isinstance(actual_seq_lengths_kv, torch.Tensor)
+                    else [int(x) for x in actual_seq_lengths_kv])
+
+        # --- KV cache block 处理 ---
+        # raw=True：整池 + 原始 block_table 原样落盘（保真，供越读问题复现）。
+        # raw=False：block 压缩重映射。注意：收集 bt 整行（含超过 nb 的陈旧列）
+        # 引用的所有 block。kernel 循环存在 kvEnd + preKVNum 越读，陈旧列指向的
+        # block 也可能被读到 —— 压缩模式仅用于 NaN-trap 等只关心数值的场合。
+        bt_meta = None
+        if block_table is not None:
+            bt_cpu = block_table.detach().cpu()
+            bs = int(block_size)
+            batch = min(len(akv_list), bt_cpu.shape[0])
+            nb_list = [(int(akv_list[b]) + bs - 1) // bs for b in range(batch)]
+            bt_meta = {
+                "orig_shape": list(block_table.shape),
+                "orig_stride": list(block_table.stride()),
+                "orig_contiguous": bool(block_table.is_contiguous()),
+                "raw": bool(raw),
+            }
+            if raw:
+                k_d = key.detach().cpu()
+                v_d = value.detach().cpu()
+                bt_d = bt_cpu
+            else:
+                full_rows = [bt_cpu[b, :].long() for b in range(batch)]
+                nblk = key.shape[0]
+                valid_rows = [r[(r >= 0) & (r < nblk)] for r in full_rows]
+                used_ids = torch.unique(torch.cat(valid_rows)) if valid_rows else \
+                    torch.empty(0, dtype=torch.long)
+                k_full = key.detach().cpu()
+                v_full = value.detach().cpu()
+                k_d = k_full[used_ids].clone()
+                v_d = v_full[used_ids].clone()
+                remap = torch.full((k_full.shape[0], ), -1, dtype=torch.long)
+                remap[used_ids] = torch.arange(used_ids.numel(), dtype=torch.long)
+                width = bt_cpu.shape[1]
+                new_bt = torch.full((batch, width), -1, dtype=torch.long)
+                for b, r in enumerate(full_rows):
+                    m = (r >= 0) & (r < nblk)
+                    new_bt[b][m] = remap[r[m]]
+                bt_d = new_bt.to(bt_cpu.dtype)
+        else:
+            nb_list = None
+            k_d = _cpu(key)
+            v_d = _cpu(value)
+            bt_d = None
+
+        dump_data = {
+            "inputs": {
+                "query": _cpu(query),
+                "key": k_d,
+                "value": v_d,
+                "atten_mask": _cpu(atten_mask),
+                "block_table": bt_d,
+                "actual_seq_lengths_q":
+                    actual_seq_lengths_q.detach().cpu()
+                    if isinstance(actual_seq_lengths_q, torch.Tensor)
+                    else torch.tensor(actual_seq_lengths_q, dtype=torch.int64),
+                "actual_seq_lengths_kv": torch.tensor(akv_list,
+                                                      dtype=torch.int64),
+            },
+            "params": {
+                "num_heads": int(num_heads),
+                "num_kv_heads": int(num_kv_heads),
+                "scale": float(scale),
+                "sparse_mode": int(sparse_mode),
+                "inner_precise": 0,
+                "pre_tokens": int(pre_tokens),
+                "next_tokens": int(next_tokens),
+                "block_size": int(block_size),
+                "sparse_lambda": float(sparse_lambda),
+                "enable_lse_flag": bool(enable_lse_flag),
+            },
+            "outputs": {
+                "attn_output": _cpu(attn_output),
+            },
+            "stage": stage,
+            "layer_name": layer_name,
+            "layer_id": layer_id,
+            "tp_rank": tp_rank,
+            "num_tokens": int(num_tokens),
+            "bt_meta": bt_meta,
+            "nb_list": nb_list if block_table is not None else None,
+            "q_stride": list(query.stride()),
+            "q_contiguous": bool(query.is_contiguous()),
+        }
+        dump_data["query_has_nan"] = bool(
+            torch.isnan(dump_data["inputs"]["query"]).any().item())
+        dump_data["key_has_nan"] = bool(torch.isnan(k_d).any().item())
+        fname = (f"fia_layer{layer_id:02d}_rank{tp_rank}_{stage}{tag}"
+                 f"_occ{seen}.pt")
+        torch.save(dump_data, os.path.join(_FIA_DUMP_DIR, fname))
+        print(f"[FIA_DUMP] saved {fname} q={tuple(dump_data['inputs']['query'].shape)} "
+              f"kv_blocks={None if bt_d is None else k_d.shape[0]}",
+              flush=True)
+    except Exception as e:
+        print(f"[FIA_DUMP] dump FAILED layer={layer_name} stage={stage}: {e}",
+              flush=True)
+
+
 def _parse_glse_block_info(softmax_lse, layer_name, stage="", **dump_kwargs):
     """Parse gLse tensor to extract sparse block and total block counts.
 
@@ -335,7 +554,7 @@ def _parse_glse_block_info(softmax_lse, layer_name, stage="", **dump_kwargs):
         if (abs(blockSparseNum - sparse_int) > 1e-4
                 or abs(blockNum - block_int) > 1e-4
                 or block_int == 0):
-            # print(f"[GLSE][{stage}] layer={layer_name} sparseblock=0 / totalblock=0 (non_int sparseSum={blockSparseNum:.2f} blockSum={blockNum:.2f})")
+            print(f"[GLSE][{stage}] layer={layer_name} sparseblock=0 / totalblock=0 (non_int sparseSum={blockSparseNum:.2f} blockSum={blockNum:.2f})")
             if _GLSE_DUMP_DECODE and stage == "decode" and dump_kwargs:
                 _dump_decode_tensors(softmax_lse, layer_name, stage, **dump_kwargs)
             return 0, 0
@@ -815,28 +1034,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                     event.record(update_stream)
 
-                    if _GLSE_DEBUG_PRINT:
-                        event.synchronize()
-                        if hasattr(actual_seq_lengths_q, 'numel'):
-                            is_decode = actual_seq_lengths_q[-1].item() == len(seq_lens)
-                        else:
-                            is_decode = actual_seq_lengths_q[-1] == len(seq_lens)
-                        stage = "decode" if is_decode else "prefill"
-                        layer_name = key if isinstance(key, str) else "unknown"
-                        sample = _glse_should_sample(layer_name)
-                        if sample:
-                            _parse_glse_block_info(
-                                softmax_lse, layer_name, stage,
-                                query=query, key=key_cache, value=value,
-                                attn_output=attn_output, block_table=block_tables,
-                                block_size=block_size,
-                                actual_seq_qlen=actual_seq_lengths_q,
-                                actual_seq_kvlen=seq_lens,
-                                num_heads=num_heads, num_kv_heads=num_kv_heads,
-                                scale=scale)
-                        else:
-                            _glse_brief_print(layer_name, stage)
-
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
         if flashcomm2_oshard_manager.flashcomm2_oshard_enable():
@@ -849,7 +1046,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
-        layer_name: str = "",
     ) -> torch.Tensor:
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
@@ -864,10 +1060,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # Get workspace from cache or calculate it if not present.
         workspace = graph_params.workspaces.get(num_tokens)
-        if _GLSE_DEBUG_PRINT:
-            softmax_lse = torch.empty(self.num_heads, num_tokens, dtype=torch.float32, device=query.device)
-        else:
-            softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
+        softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
@@ -914,12 +1107,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
         )
 
-        extra_args = {}
-        if _GLSE_DEBUG_PRINT or _ANTIQUANT_ONLY:
-            extra_args["antiquant_mode"] = _GLSE_ANTIQUANT_MODE
-            if _GLSE_DEBUG_PRINT:
-                extra_args["softmax_lse_flag"] = True
-
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score.out(
             query=query,
@@ -937,29 +1124,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sparse_mode=3,
             workspace=workspace,
             out=[output, softmax_lse],
-            **extra_args,
         )
-
-        if _GLSE_DEBUG_PRINT:
-            # 用 actual_seq_lengths_q 判断真正的 decode/prefill，
-            # 而非 attn_metadata.attn_state（FULL_DECODE_ONLY 图模式可能不准）
-            if actual_seq_lengths_q[-1].item() == len(attn_metadata.seq_lens):
-                stage = "decode"
-            else:
-                stage = "prefill"
-            sample = _glse_should_sample(layer_name)
-            if sample:
-                _parse_glse_block_info(
-                    softmax_lse, layer_name, stage,
-                    query=query, key=key, value=value,
-                    attn_output=output, block_table=block_table,
-                    block_size=block_size,
-                    actual_seq_qlen=actual_seq_lengths_q,
-                    actual_seq_kvlen=actual_seq_lengths_kv,
-                    num_heads=self.num_heads, num_kv_heads=self.num_kv_heads,
-                    scale=self.scale)
-            else:
-                _glse_brief_print(layer_name, stage)
 
         output = output.view(num_tokens, self.num_heads, self.head_size)
 
@@ -1118,13 +1283,52 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return False
         if self.sliding_window is not None:
             return False
-        if attn_metadata.attn_state not in (
-            AscendAttentionState.PrefillNoCache,
-            AscendAttentionState.PrefillCacheHit,
-            AscendAttentionState.DecodeOnly,
-            AscendAttentionState.ChunkedPrefill,
-        ):
+        # 真实前传分场景路由模式：仅 _FIA_CUSTOM_STAGES 列出的场景走 custom。
+        # _FIA_AB_LOG=1 时 decode/纯 chunk 无条件进 A/B 分支：STAGES 内的场景
+        # custom 写正式 output，其余场景 baseline 写正式 output、custom 仅对比。
+        if _FIA_CUSTOM_STAGES:
+            _st = attn_metadata.attn_state
+            if _st == AscendAttentionState.DecodeOnly:
+                return "decode" in _FIA_CUSTOM_STAGES or _FIA_AB_LOG
+            if _st == AscendAttentionState.PrefillNoCache:
+                # 首 chunk 无 cache 的 prefill：按 "prefill"（或兼容 "chunk"）路由
+                return ("prefill" in _FIA_CUSTOM_STAGES
+                        or "chunk" in _FIA_CUSTOM_STAGES)
+            if _st == AscendAttentionState.ChunkedPrefill:
+                aq = attn_metadata.actual_seq_lengths_q
+                if aq:
+                    q_lens = [aq[0]] + [aq[i] - aq[i - 1] for i in range(1, len(aq))]
+                    if min(q_lens) == 1 and max(q_lens) > 1:
+                        return "mixed" in _FIA_CUSTOM_STAGES
+                return "chunk" in _FIA_CUSTOM_STAGES or _FIA_AB_LOG
             return False
+        # 全场景 A/B 采样模式：除混合 batch 外所有 state 进 custom 分支（custom 写
+        # 临时 buffer，正式前传仍是 baseline），抓 decode-only/纯 chunk 对比数据。
+        # 混合 batch：_FIA_AB_MIXED_GRAB=True 时也进 A/B 分支，但仅在跑 custom 前
+        # raw dump 输入（内部按 _FIA_AB_MIXED_RUN_CUSTOM 决定是否线上跑 custom，
+        # 默认不跑 —— custom regular kernel 在混合 batch 上不仅产生 NaN/错值，
+        # 还曾致 worker 进程设备侧崩溃（20260803-194454 run））。
+        if _FIA_AB_ALL_STAGES:
+            if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+                aq = attn_metadata.actual_seq_lengths_q
+                if aq:
+                    q_lens = [aq[0]] + [aq[i] - aq[i - 1] for i in range(1, len(aq))]
+                    if min(q_lens) == 1 and max(q_lens) > 1:
+                        return _FIA_AB_MIXED_GRAB
+            return True
+        # 仅纯 chunk prefill 走 custom：decode-only 的 custom FD kernel 线上存在
+        # 间歇性整行错值（离线全部 bit 一致，线上污染根因未定位），DecodeOnly 回退
+        # baseline；混合 batch custom regular kernel 有状态依赖竞争（NaN/整行错值），
+        # 同样回退 baseline。
+        if attn_metadata.attn_state != AscendAttentionState.ChunkedPrefill:
+            return False
+        # actual_seq_lengths_q 为前缀和，逐请求 q_len = 相邻差分；
+        # min q_len==1 && max q_len>1 即 decode 与 prefill chunk 混合 batch。
+        aq = attn_metadata.actual_seq_lengths_q
+        if aq:
+            q_lens = [aq[0]] + [aq[i] - aq[i - 1] for i in range(1, len(aq))]
+            if min(q_lens) == 1 and max(q_lens) > 1:
+                return False
         return True
 
     def forward_custom_fused_infer_attention(
@@ -1169,20 +1373,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 device=query.device,
             )
 
-        sparse_mode = 3 if attn_metadata.causal else 0
-        atten_mask = attn_metadata.attn_mask if attn_metadata.causal else None
+        # Match the baseline (torch_npu) path: always sparse_mode=3 with attn_mask.
+        sparse_mode = 3
+        atten_mask = attn_metadata.attn_mask
 
         # Sparse lambda is passed directly; -99.0 means "dense" (no skipping).
         sparse_lambda = -99.0
-        enable_lse_flag = False
-        if _GLSE_DEBUG_PRINT or _ANTIQUANT_ONLY:
-            sparse_lambda = _GLSE_ANTIQUANT_THRESHOLD
-            sample = _GLSE_DEBUG_PRINT and _glse_should_sample(layer_name)
-            if sample:
-                enable_lse_flag = True
-                
-        sparse_lambda = -3.0
-        enable_lse_flag = True
+        enable_lse_flag = False  # A/B 结论: lse=True 仍 NaN(occ11)且触发 ScatterElements 崩溃, 回退
         attn_output, softmax_lse = torch.ops._C_ascend.npu_fused_infer_attention_score(
             query,
             key,
@@ -1224,36 +1421,68 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_kv_heads=self.num_kv_heads,
                 scale=self.scale,
             )
-            # chunked_prefill dense (sparseblock==0, totalblock!=0) 时 dump 单算子复现数据
-            # if (stage == "chunked_prefill"
-            #         and sparse_int == 0
-            #         and block_int > 0
-            #         and not _dumped_chunked_prefill_dense
-            #         and ".layers.30." in layer_name):
-            #     _dump_chunked_prefill_dense_inputs(
-            #         layer_name=layer_name,
-            #         stage=stage,
-            #         sparseblock=sparse_int,
-            #         totalblock=block_int,
-            #         query=query,
-            #         key=key,
-            #         value=value,
-            #         atten_mask=atten_mask,
-            #         actual_seq_lengths_q=actual_seq_lengths_q,
-            #         actual_seq_lengths_kv=actual_seq_lengths_kv,
-            #         block_table=block_table,
-            #         num_heads=self.num_heads,
-            #         scale=self.scale,
-            #         sliding_window=self.sliding_window,
-            #         num_kv_heads=self.num_kv_heads,
-            #         sparse_mode=sparse_mode,
-            #         block_size=block_size,
-            #         antiquant_mode=0,
-            #         sparse_lambda=sparse_lambda,
-            #         enable_lse_flag=enable_lse_flag,
-            #         attn_output=attn_output,
-            #         softmax_lse=softmax_lse,
-            #     )
+
+        if _FIA_DUMP_ON_NAN:
+            import re as _re
+            _lm = _re.search(r"layers\.(\d+)", layer_name)
+            _lid = int(_lm.group(1)) if _lm else -1
+            if _lid not in _fia_nan_dumped_layers \
+                    and bool(torch.isnan(attn_output).any().item()):
+                _fia_nan_dumped_layers.add(_lid)
+                print(f"[FIA_DUMP][NAN-TRAP] layer={layer_name} stage={stage} "
+                      f"num_tokens={num_tokens} "
+                      f"query_nan={bool(torch.isnan(query).any().item())} "
+                      f"key_nan={bool(torch.isnan(key).any().item())}",
+                      flush=True)
+                _fia_repro_dump(
+                    layer_name=layer_name,
+                    stage=stage,
+                    num_tokens=num_tokens,
+                    attn_output=attn_output,
+                    query=query,
+                    key=key,
+                    value=value,
+                    atten_mask=atten_mask,
+                    actual_seq_lengths_q=actual_seq_lengths_q,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    block_table=block_table,
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    scale=self.scale,
+                    sparse_mode=sparse_mode,
+                    pre_tokens=self.sliding_window
+                    if self.sliding_window is not None else SWA_INT_MAX,
+                    next_tokens=2147483647,
+                    block_size=block_size,
+                    sparse_lambda=sparse_lambda,
+                    enable_lse_flag=enable_lse_flag,
+                    force=True,
+                    tag="_nan",
+                )
+
+        _fia_repro_dump(
+            layer_name=layer_name,
+            stage=stage,
+            num_tokens=num_tokens,
+            attn_output=attn_output,
+            query=query,
+            key=key,
+            value=value,
+            atten_mask=atten_mask,
+            actual_seq_lengths_q=actual_seq_lengths_q,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            block_table=block_table,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            scale=self.scale,
+            sparse_mode=sparse_mode,
+            pre_tokens=self.sliding_window
+            if self.sliding_window is not None else SWA_INT_MAX,
+            next_tokens=2147483647,
+            block_size=block_size,
+            sparse_lambda=sparse_lambda,
+            enable_lse_flag=enable_lse_flag,
+        )
 
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
@@ -1302,7 +1531,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 atten_mask = attn_metadata.attn_mask
                 sparse_mode = 3
-            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score_v2(
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
                 key,
                 value,
@@ -1318,17 +1547,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_size=block_size,
                 actual_seq_qlen=actual_seq_qlen,
                 actual_seq_kvlen=actual_seq_lengths_kv,
-                learnable_sink=self.sinks
+                learnable_sink=self.sinks,
             )
-
         else:
-            fia_kwargs = {}
-            if _GLSE_DEBUG_PRINT or _ANTIQUANT_ONLY:
-                fia_kwargs["antiquant_mode"] = _GLSE_ANTIQUANT_MODE
-                sample = _GLSE_DEBUG_PRINT and _glse_should_sample(layer_name)
-                if sample:
-                    fia_kwargs["softmax_lse_flag"] = True
-            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score(
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                 query=query,
                 key=key,
                 value=value,
@@ -1342,23 +1564,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_heads=self.num_heads,
                 scale=self.scale,
                 sparse_mode=3,
-                **fia_kwargs,
             )
-
-            if _GLSE_DEBUG_PRINT:
-                stage = _get_stage_name(attn_metadata.attn_state)
-                if sample:
-                    _parse_glse_block_info(
-                        softmax_lse, layer_name, stage,
-                        query=query, key=key, value=value,
-                        attn_output=attn_output, block_table=block_table,
-                        block_size=block_size,
-                        actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
-                        actual_seq_kvlen=actual_seq_lengths_kv,
-                        num_heads=self.num_heads, num_kv_heads=self.num_kv_heads,
-                        scale=self.scale)
-                else:
-                    _glse_brief_print(layer_name, stage)
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
@@ -1451,20 +1657,198 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and self.sliding_window is None
         ):
             if layer_name not in _fia_branch_logged_layers:
-                # print(f"[FIA_BRANCH] layer={layer_name} use forward_paged_attention, "
-                #       f"attn_state={attn_metadata.attn_state}, num_tokens={num_tokens}", flush=True)
+                print(f"[FIA_BRANCH] layer={layer_name} use forward_paged_attention, "
+                      f"attn_state={attn_metadata.attn_state}, num_tokens={num_tokens}", flush=True)
                 _fia_branch_logged_layers.add(layer_name)
             output = self.forward_paged_attention(query, attn_metadata, output)
         elif self._can_use_custom_fia(attn_metadata):
             if layer_name not in _fia_branch_logged_layers:
-                # print(f"[FIA_BRANCH] layer={layer_name} use forward_custom_fused_infer_attention (custom FIA), "
-                #       f"attn_state={attn_metadata.attn_state}, num_tokens={num_tokens}", flush=True)
+                print(f"[FIA_BRANCH] layer={layer_name} use forward_custom_fused_infer_attention (custom FIA), "
+                      f"attn_state={attn_metadata.attn_state}, num_tokens={num_tokens}", flush=True)
                 _fia_branch_logged_layers.add(layer_name)
-            output = self.forward_custom_fused_infer_attention(query, key, value, attn_metadata, output, layer_name)
+            if _FIA_AB_COMPARE:
+                nt = attn_metadata.actual_seq_lengths_q[-1]
+                stage = _get_stage_name(attn_metadata.attn_state)
+                # 分场景判定：decode-only / 混合 batch / 纯 chunk。
+                # raw dump 必须在跑 custom 之前完成 —— 既防设备崩溃丢现场，
+                # 又避免 custom 潜在越界写污染输入快照。
+                _scen = None
+                if stage == "decode":
+                    _scen = "decode"
+                elif stage == "chunked_prefill":
+                    _aqs = attn_metadata.actual_seq_lengths_q
+                    _ql = ([_aqs[0]] + [_aqs[i] - _aqs[i - 1]
+                                        for i in range(1, len(_aqs))]) if _aqs else []
+                    if _ql:
+                        _scen = "mixed" if (min(_ql) == 1 and max(_ql) > 1) else "chunk"
+                _grab_this = bool(_FIA_AB_STAGE_DUMP and _scen
+                                  and _scen not in _fia_stage_dumped)
+                if _grab_this:
+                    _fia_stage_dumped.add(_scen)
+                    print(f"[FIA_AB][STAGE-DUMP] scenario={_scen} layer={layer_name} "
+                          f"tokens={nt} (raw, pre-op)", flush=True)
+                    try:
+                        _k2, _v2, _bs2, _bt2, _akv2 = self._get_fia_params(
+                            key, value, attn_metadata)
+                        _aq2 = torch.tensor(attn_metadata.actual_seq_lengths_q,
+                                            dtype=torch.int64, device=query.device)
+                        if not isinstance(_akv2, torch.Tensor):
+                            _akv2 = torch.tensor(_akv2, dtype=torch.int64,
+                                                 device=query.device)
+                        _fia_repro_dump(
+                            layer_name=layer_name, stage=stage, num_tokens=nt,
+                            attn_output=None, query=query[:nt],
+                            key=_k2, value=_v2,
+                            atten_mask=attn_metadata.attn_mask,
+                            actual_seq_lengths_q=_aq2,
+                            actual_seq_lengths_kv=_akv2,
+                            block_table=_bt2,
+                            num_heads=self.num_heads,
+                            num_kv_heads=self.num_kv_heads,
+                            scale=self.scale, sparse_mode=3,
+                            pre_tokens=SWA_INT_MAX, next_tokens=2147483647,
+                            block_size=_bs2, sparse_lambda=-99.0,
+                            enable_lse_flag=False,
+                            force=True, tag=f"_{_scen}", raw=_FIA_DUMP_RAW)
+                    except Exception as _e:
+                        print(f"[FIA_AB][STAGE-DUMP] FAILED: {_e}", flush=True)
+                # 混合 batch 默认不线上跑 custom（曾致设备崩溃）：baseline 前传，
+                # custom 行为靠离线单算子复现。
+                if _scen == "mixed" and not _FIA_AB_MIXED_RUN_CUSTOM:
+                    output = self.forward_fused_infer_attention(
+                        query, key, value, attn_metadata, output, layer_name)
+                    print(f"[FIA_AB][MIXED-SKIP] layer={layer_name} tokens={nt} "
+                          f"custom 未线上跑，仅 baseline 前传", flush=True)
+                    return output
+                # A/B 双跑：默认 custom -> 临时 buffer、baseline -> 正式 output 前传；
+                # 角色反转按调用判定：仅当前场景列入 _FIA_CUSTOM_STAGES 时
+                # custom -> 正式 output 前传，baseline -> 临时 buffer 仅做对比。
+                _custom_real = (_FIA_AB_CUSTOM_REAL and _scen is not None
+                                and _scen in _FIA_CUSTOM_STAGES)
+                if _custom_real:
+                    output = self.forward_custom_fused_infer_attention(
+                        query, key, value, attn_metadata, output, layer_name)
+                    output_custom = output
+                    output_base = self.forward_fused_infer_attention(
+                        query, key, value, attn_metadata,
+                        torch.empty_like(output), layer_name)
+                else:
+                    output_custom = self.forward_custom_fused_infer_attention(
+                        query, key, value, attn_metadata,
+                        torch.empty_like(output), layer_name)
+                    output_base = None
+                    output = self.forward_fused_infer_attention(
+                        query, key, value, attn_metadata, output, layer_name)
+                oc = output_custom[:nt]
+                ob = output_base[:nt] if _custom_real else output[:nt]
+                # 双输出快照（对应 pre-op raw dump 的同一次调用）
+                if _grab_this:
+                    try:
+                        torch.save(
+                            {"output_custom": oc.detach().cpu(),
+                             "output_base": ob.detach().cpu()},
+                            os.path.join(
+                                _FIA_DUMP_DIR,
+                                f"fia_stage_outputs_{_scen}_pid{os.getpid()}_"
+                                f"{layer_name.replace('.', '_')}.pt"))
+                    except Exception as _e:
+                        print(f"[FIA_AB][STAGE-DUMP] outputs save FAILED: {_e}",
+                              flush=True)
+                nan_c_t = torch.isnan(oc)
+                nan_b_t = torch.isnan(ob)
+                st = _fia_ab_stats.setdefault(stage, dict(
+                    calls=0, nan_calls=0, elems=0, diff=0,
+                    max_abs=0.0, max_rel=0.0, hist=[0] * 6,
+                    worst=(0.0, "", 0)))
+                st["calls"] += 1
+                if nan_c_t.any().item() or nan_b_t.any().item():
+                    st["nan_calls"] += 1
+                    nc = int(nan_c_t.sum().item())
+                    nb = int(nan_b_t.sum().item())
+                    md = (oc.float() - ob.float()).abs().nan_to_num(0).max().item()
+                    same_pos = bool((nan_c_t == nan_b_t).all().item())
+                    _fia_ab_nan_events.append((layer_name, stage, nt, nc, nb, md))
+                    print(f"[FIA_AB][NAN] layer={layer_name} stage={stage} tokens={nt} "
+                          f"nan_custom={nc} nan_base={nb} 位置一致={same_pos} "
+                          f"maxdiff(有限)={md:.4e}", flush=True)
+                else:
+                    # 数值对比：bit 一致率 / abs / rel / ulp 直方图
+                    ocf, obf = oc.float(), ob.float()
+                    d = (ocf - obf).abs()
+                    bitdiff = (oc.view(torch.int16) != ob.view(torch.int16))
+                    nd = int(bitdiff.sum().item())
+                    st["elems"] += d.numel()
+                    st["diff"] += nd
+                    if nd:
+                        mabs = d.max().item()
+                        m = obf.abs() > 1e-3
+                        mrel = (d[m] / obf[m].abs()).max().item() if m.any().item() else 0.0
+                        ulp = obf.abs() * (2 ** -8) + 1e-30
+                        ud = (d / ulp)[bitdiff].long().clamp(0, 5)
+                        hist = torch.bincount(ud, minlength=6).tolist()
+                        st["hist"] = [a + b for a, b in zip(st["hist"], hist)]
+                        st["max_abs"] = max(st["max_abs"], mabs)
+                        st["max_rel"] = max(st["max_rel"], mrel)
+                        if mrel > st["worst"][0]:
+                            st["worst"] = (mrel, layer_name, nt)
+                        if mrel > _FIA_AB_REL_ALERT:
+                            print(f"[FIA_AB][DIFF] layer={layer_name} stage={stage} tokens={nt} "
+                                  f"diff_elems={nd}/{d.numel()} max_abs={mabs:.4e} max_rel={mrel:.4e} "
+                                  f"ulp_hist[<1,1,2,3,4,>=5]={hist}", flush=True)
+                        # 大差异陷阱：抓 decode/chunk 大差异 batch 的完整算子输入做离线复现
+                        global _fia_bigdiff_dump_count
+                        if (_FIA_AB_BIGDIFF_DUMP and stage in ("decode", "chunked_prefill")
+                                and mabs > _FIA_AB_BIGDIFF_THRESH
+                                and _fia_bigdiff_dump_count < _FIA_AB_BIGDIFF_MAX):
+                            _fia_bigdiff_dump_count += 1
+                            print(f"[FIA_AB][BIGDIFF-DUMP] layer={layer_name} tokens={nt} "
+                                  f"max_abs={mabs:.4e} (#{_fia_bigdiff_dump_count})", flush=True)
+                            try:
+                                _k2, _v2, _bs2, _bt2, _akv2 = self._get_fia_params(
+                                    key, value, attn_metadata)
+                                _aq2 = torch.tensor(attn_metadata.actual_seq_lengths_q,
+                                                    dtype=torch.int64, device=query.device)
+                                if not isinstance(_akv2, torch.Tensor):
+                                    _akv2 = torch.tensor(_akv2, dtype=torch.int64,
+                                                         device=query.device)
+                                _fia_repro_dump(
+                                    layer_name=layer_name, stage=stage, num_tokens=nt,
+                                    attn_output=output_custom[:nt], query=query[:nt],
+                                    key=_k2, value=_v2,
+                                    atten_mask=attn_metadata.attn_mask,
+                                    actual_seq_lengths_q=_aq2,
+                                    actual_seq_lengths_kv=_akv2,
+                                    block_table=_bt2,
+                                    num_heads=self.num_heads,
+                                    num_kv_heads=self.num_kv_heads,
+                                    scale=self.scale, sparse_mode=3,
+                                    pre_tokens=SWA_INT_MAX, next_tokens=2147483647,
+                                    block_size=_bs2, sparse_lambda=-99.0,
+                                    enable_lse_flag=False,
+                                    force=True, tag="_bigdiff", raw=_FIA_DUMP_RAW)
+                                torch.save(
+                                    {"output_custom": oc.detach().cpu(),
+                                     "output_base": ob.detach().cpu()},
+                                    os.path.join(
+                                        _FIA_DUMP_DIR,
+                                        f"fia_bigdiff_outputs_pid{os.getpid()}_"
+                                        f"{layer_name.replace('.', '_')}.pt"))
+                            except Exception as _e:
+                                print(f"[FIA_AB][BIGDIFF-DUMP] FAILED: {_e}", flush=True)
+                if st["calls"] % _FIA_AB_STAT_EVERY == 0:
+                    exact = 1.0 - st["diff"] / max(st["elems"], 1)
+                    w = st["worst"]
+                    print(f"[FIA_AB][STAT] stage={stage} calls={st['calls']} nan_calls={st['nan_calls']} "
+                          f"bit一致率={exact * 100:.4f}% diff_elems={st['diff']}/{st['elems']} "
+                          f"max_abs={st['max_abs']:.4e} max_rel={st['max_rel']:.4e} "
+                          f"ulp_hist[<1,1,2,3,4,>=5]={st['hist']} "
+                          f"worst=(rel={w[0]:.4e} layer={w[1]} tokens={w[2]})", flush=True)
+            else:
+                output = self.forward_custom_fused_infer_attention(query, key, value, attn_metadata, output, layer_name)
         else:
             if layer_name not in _fia_branch_logged_layers:
-                # print(f"[FIA_BRANCH] layer={layer_name} use forward_fused_infer_attention (original FIA), "
-                #       f"attn_state={attn_metadata.attn_state}, num_tokens={num_tokens}", flush=True)
+                print(f"[FIA_BRANCH] layer={layer_name} use forward_fused_infer_attention (original FIA), "
+                      f"attn_state={attn_metadata.attn_state}, num_tokens={num_tokens}", flush=True)
                 _fia_branch_logged_layers.add(layer_name)
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, layer_name)
 
@@ -1778,12 +2162,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     break
 
             if all_new_prefill and float_key is not None and float_value is not None:
-                _log_chunked_prefill_branch(layer.layer_name, all_new_prefill, float_key, float_value, attn_metadata)
                 prefill_k = float_key[num_decode_tokens:num_tokens]
                 prefill_v = float_value[num_decode_tokens:num_tokens]
                 prefill_seq_kvlen = prefill_seq_qlen
             else:
-                _log_chunked_prefill_branch(layer.layer_name, all_new_prefill, float_key, float_value, attn_metadata)
                 num_block, blk_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
                 paged_k = self.key_cache.view(num_block, blk_size, -1)  # type: ignore[attr-defined]
                 paged_v = self.value_cache.view(num_block, blk_size, -1)  # type: ignore[attr-defined]

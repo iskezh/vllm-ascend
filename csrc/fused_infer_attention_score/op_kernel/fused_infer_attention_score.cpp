@@ -62,6 +62,15 @@ using namespace AscendC;
             actualSeqLengths, actualSeqLengthsKV, user, tiling, sink); \
     }
 
+// Flash-decode: 与 DISPATCH_FA_INFER_PAGED 相同，仅 IS_FD=true（split-KV + LSE 归并）
+#define DISPATCH_FA_INFER_PAGED_FD(KEY, DTYPE_Q, DTYPE_KV, MASK_ENUM) \
+    if (TILING_KEY_VAR == KEY) { \
+        SplitFuse::FAInfer<DTYPE_Q, DTYPE_KV, float, true, true, \
+                           MASK_ENUM, FaiKernel::inputLayout::TND>( \
+            query, key, value, pse_shift, attenMask, blocktable, attentionOut, softmaxLse, \
+            actualSeqLengths, actualSeqLengthsKV, user, tiling, sink); \
+    }
+
 extern "C" __global__ __aicore__ void vllm_fused_infer_attention_score(
     __gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *value,
     __gm__ uint8_t *pse_shift, __gm__ uint8_t *attenMask,
@@ -107,6 +116,10 @@ extern "C" __global__ __aicore__ void vllm_fused_infer_attention_score(
     TILING_KEY_IS(QBF16_KVBF16_OUTBF16_LSEOUT_TND_PAGEDCACHE_CAUSALMASK_SPLITFUSE_TILING);
     TILING_KEY_IS(QF16_KVF16_OUTF16_NOLSEOUT_TND_PAGEDCACHE_NOMASK_DECODING_TILING);
     TILING_KEY_IS(QBF16_KVBF16_OUTBF16_NOLSEOUT_TND_PAGEDCACHE_NOMASK_DECODING_TILING);
+    TILING_KEY_IS(QF16_KVF16_OUTF16_NOLSEOUT_TND_PAGEDCACHE_NOMASK_SPLITFUSE_TILING_FD);
+    TILING_KEY_IS(QF16_KVF16_OUTF16_NOLSEOUT_TND_PAGEDCACHE_CAUSALMASK_SPLITFUSE_TILING_FD);
+    TILING_KEY_IS(QBF16_KVBF16_OUTBF16_NOLSEOUT_TND_PAGEDCACHE_NOMASK_SPLITFUSE_TILING_FD);
+    TILING_KEY_IS(QBF16_KVBF16_OUTBF16_NOLSEOUT_TND_PAGEDCACHE_CAUSALMASK_SPLITFUSE_TILING_FD);
 
     // Dispatch using runtime-evaluated tiling key (the if-body is compiled per key above).
     DISPATCH_FA_INFER(QF16_KVF16_OUTF16_NOLSEOUT_TND_NOCACHE_NOMASK_SPLITFUSE_TILING,
@@ -172,4 +185,14 @@ extern "C" __global__ __aicore__ void vllm_fused_infer_attention_score(
                             bfloat16_t, bfloat16_t, FaiKernel::MaskType::MASK_CAUSAL);
     DISPATCH_FA_INFER_PAGED_LSE(QBF16_KVBF16_OUTBF16_LSEOUT_TND_PAGEDCACHE_CAUSALMASK_SPLITFUSE_TILING,
                                 bfloat16_t, bfloat16_t, FaiKernel::MaskType::MASK_CAUSAL);
+
+    // Flash-decode 分发（IS_FD=true，split-KV + LSE 归并）
+    DISPATCH_FA_INFER_PAGED_FD(QF16_KVF16_OUTF16_NOLSEOUT_TND_PAGEDCACHE_NOMASK_SPLITFUSE_TILING_FD,
+                               half, half, FaiKernel::MaskType::NO_MASK);
+    DISPATCH_FA_INFER_PAGED_FD(QF16_KVF16_OUTF16_NOLSEOUT_TND_PAGEDCACHE_CAUSALMASK_SPLITFUSE_TILING_FD,
+                               half, half, FaiKernel::MaskType::MASK_CAUSAL);
+    DISPATCH_FA_INFER_PAGED_FD(QBF16_KVBF16_OUTBF16_NOLSEOUT_TND_PAGEDCACHE_NOMASK_SPLITFUSE_TILING_FD,
+                               bfloat16_t, bfloat16_t, FaiKernel::MaskType::NO_MASK);
+    DISPATCH_FA_INFER_PAGED_FD(QBF16_KVBF16_OUTBF16_NOLSEOUT_TND_PAGEDCACHE_CAUSALMASK_SPLITFUSE_TILING_FD,
+                               bfloat16_t, bfloat16_t, FaiKernel::MaskType::MASK_CAUSAL);
 }

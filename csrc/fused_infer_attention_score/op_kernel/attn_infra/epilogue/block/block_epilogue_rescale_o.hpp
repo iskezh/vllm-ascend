@@ -266,7 +266,7 @@ public:
         uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod,
         uint32_t needRowLoop, uint32_t isLastRowLoop, uint32_t rowOffsetLoop,
         uint32_t proTokenIdx, uint32_t proTokenNum, uint32_t epiTokenNum, uint32_t integralHeadNum,
-        uint8_t sp_flag = 0, uint32_t sp_flag_row_offset = 0, uint32_t targetRow = 0, bool printFlag = false)
+        uint8_t sp_flag = 0, uint32_t sp_flag_row_offset = 0)
     {
         uint32_t curRowNum = layoutInput.shape(0);
         uint32_t embed = layoutInput.shape(1);
@@ -473,7 +473,7 @@ public:
         uint32_t proTokenIdx, uint32_t proTokenNum, uint32_t epiTokenNum, uint32_t integralHeadNum,
         uint32_t rowOffsetCurLoop, int32_t delStartRow, int32_t delEndRow, uint32_t qSeqlen,
         uint32_t qSBlockIdx, uint32_t rowNum, uint32_t inRowOffsetThisSubBlock,
-        uint8_t sp_flag, uint32_t sp_flag_row_offset, uint32_t targetRow, bool printFlag,
+        uint8_t sp_flag, uint32_t sp_flag_row_offset,
         const SplitKVParams& splitParams, uint32_t curQNBlockTile)
     {
         uint32_t curRowNum = layoutInput.shape(0);
@@ -849,7 +849,7 @@ public:
         uint32_t qSBlockSize, uint32_t qNBlockSize, uint32_t kvNBlockSize,
         uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod,
         uint32_t isNew,
-        uint8_t sp_flag, uint16_t sp_flag_arr, uint32_t targetRow, bool printFlag)
+        uint8_t sp_flag, uint16_t sp_flag_arr)
     {
         uint32_t rowNum = actualBlockShape.m();
         uint32_t embed = actualBlockShape.n();
@@ -867,7 +867,9 @@ public:
             }
             sp_flag_row_offset = pos * 16 * 128;
         }
-
+        sp_flag_arr = 0;
+        sp_flag = 0;
+                
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         uint32_t subBlockNum = AscendC::GetSubBlockNum();
 
@@ -971,9 +973,7 @@ public:
                     epiTokenNum,
                     integralHeadNum,
                     sp_flag,
-                    sp_flag_row_offset,
-                    targetRow,
-                    printFlag);
+                    sp_flag_row_offset);
             }
         }
     }
@@ -1119,7 +1119,7 @@ public:
         uint32_t qSBlockSize, uint32_t qNBlockSize,
         uint32_t isFirstStackTile, uint32_t isLastStackTile, uint32_t curStackTileMod,
         int32_t delStartRow, int32_t delEndRow, uint32_t qSeqlen, uint32_t qSBlockIdx, uint32_t curQNBlockTile,
-        uint8_t sp_flag, uint16_t sp_flag_arr, uint32_t targetRow, bool printFlag,
+        uint8_t sp_flag, uint16_t sp_flag_arr,
         const SplitKVParams& splitParams = SplitKVParams())
     {
         uint32_t rowNum = actualBlockShape.m();
@@ -1214,6 +1214,8 @@ public:
                     }
                     sp_flag_row_offset = pos * 16 * 128;
                 }
+                sp_flag_arr = 0;
+                sp_flag = 0;
                 int64_t offsetInput = layoutInput.GetOffset(MatrixCoord(rowOffsetCurLoop, 0));
                 auto gInputCurLoop = gInput[offsetInput + sp_flag_row_offset];
                 auto layoutInputCurLoop = layoutInput.GetTileLayout(MatrixCoord(rowActualCurLoop, embedV));
@@ -1258,8 +1260,6 @@ public:
                     inRowOffsetThisSubBlock,
                     sp_flag,
                     sp_flag_row_offset,
-                    targetRow,
-                    printFlag,
                     blockParams,
                     curQNBlockTile);
             }
