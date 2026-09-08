@@ -103,6 +103,35 @@ class AscendFusionConfig:
 
 
 @config
+class CustomFIAConfig:
+    """Configuration Object for ``additional_config["custom_fia_config"]``.
+
+    Controls the custom fused_infer_attention_score (BlasST) branch:
+      - enabled: route eligible attention calls (TND layout, sparse_mode 0/3,
+        no sliding window / learnable sink) to the custom op instead of
+        torch_npu FIA.
+      - sparse_lambda: BlasST block-sparse threshold; -99.0 means dense
+        (detection only, no block skipping).
+      - full_graph: allow ACL-Graph capture of the custom op through the
+        host-list task-update path (DecodeOnly buckets only).
+      - host_seq_tiling: let the op's tiling read sequence lengths from host
+        attrs (zero D2H). Disable to fall back to D2H device reads.
+      - flash_decode: enable the FlashDecode split path inside the custom op
+        (small decode batches over long KV).
+
+    ``host_seq_tiling`` / ``flash_decode`` are forwarded to the op as tiling
+    attrs; they replace the former ``VLLM_FIA_HOST_SEQ_TILING`` /
+    ``VLLM_FIA_FD`` environment kill-switches.
+    """
+
+    enabled: bool = False
+    sparse_lambda: float = -99.0
+    full_graph: bool = False
+    host_seq_tiling: bool = True
+    flash_decode: bool = True
+
+
+@config
 class EplbConfig:
     """Configuration Object for ``additional_config["eplb_config"]``.
 
@@ -431,6 +460,7 @@ class AscendConfig:
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
+    custom_fia_config: CustomFIAConfig = dataclasses.field(default_factory=CustomFIAConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)

@@ -41,6 +41,7 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
@@ -831,6 +832,67 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             seq_lens,
                         )
                         continue
+                    if param[0] == "custom_fia":
+                        # custom FIA 的 task update（镜像下方 baseline FIA 分支）。
+                        # seq 的 H2D 上传被 CANN 禁止出现在 update 窗口内（PoC
+                        # 实测 507009），先用 preload_seq 在窗口外刷新 pinned 缓存
+                        # （cache.dev 地址恒定，capture 录制的是地址），窗口内
+                        # _out 变体不拷贝，纯 aclnn launch patch。
+                        (
+                            _,
+                            query,
+                            key_cache,
+                            value,
+                            _block_table_cap,
+                            attn_mask,
+                            block_size,
+                            _aq_cap,
+                            _akv_cap,
+                            num_kv_heads,
+                            num_heads,
+                            scale,
+                            attention_out,
+                            softmax_lse,
+                            sparse_stats,
+                        ) = param
+                        seq_lens = attn_metadata[key].seq_lens_list
+                        actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                        block_tables = attn_metadata[key].block_tables
+                        torch.ops._C_ascend.npu_fused_infer_attention_score_preload_seq(
+                            actual_seq_lengths_q, seq_lens, query)
+                        torch.npu.graph_task_update_begin(update_stream, handle)
+                        torch.ops._C_ascend.npu_fused_infer_attention_score_out(
+                            query,
+                            key_cache,
+                            value,
+                            attention_out,
+                            softmax_lse,
+                            sparse_stats,
+                            graph_params.workspaces.get(num_tokens),
+                            None,  # pse_shift
+                            attn_mask,
+                            actual_seq_lengths_q,
+                            seq_lens,
+                            block_tables,
+                            num_heads,
+                            scale,
+                            SWA_INT_MAX,  # pre_tokens
+                            2147483647,  # next_tokens
+                            "TND",
+                            num_kv_heads,
+                            3,  # sparse_mode
+                            0,  # inner_precise
+                            block_size,
+                            0,  # antiquant_mode
+                            get_ascend_config().custom_fia_config.sparse_lambda,
+                            False,  # softmax_lse_flag：图内禁用统计
+                            False,  # sparse_stats_flag
+                            get_ascend_config().custom_fia_config.host_seq_tiling,
+                            get_ascend_config().custom_fia_config.flash_decode,
+                        )
+                        torch.npu.graph_task_update_end(update_stream)
+                        event.record(update_stream)
+                        continue
                     (
                         query,
                         key_cache,
@@ -1345,6 +1407,285 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    def _forward_fia_slidingwindow(self, query: torch.Tensor, attn_metadata: AscendMetadata, output: torch.Tensor):
+        batch_size = attn_metadata.seq_lens.shape[0]
+        block_size = 128
+        query = query.view(batch_size, 1, self.num_heads * self.head_size)
+        key = self.key_cache
+        value = self.value_cache
+        if self.key_cache is not None and self.value_cache is not None:
+            block_size = self.key_cache.shape[1]
+            key = self.key_cache.flatten(2, 3).contiguous()
+            value = self.value_cache.flatten(2, 3).contiguous()
+
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            query,
+            key,
+            value,
+            num_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
+            input_layout="BSH",
+            block_size=block_size,
+            pre_tokens=self.sliding_window,
+            scale=self.scale,
+            block_table=attn_metadata.block_tables,
+            actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
+            actual_seq_lengths_kv=attn_metadata.seq_lens,
+        )
+
+        attn_output = attn_output.view(batch_size, self.num_heads, self.head_size)
+        output[:batch_size] = attn_output[:batch_size]
+        return output
+
+    def _can_use_custom_fia(
+        self,
+        attn_metadata: AscendMetadata,
+    ) -> bool:
+        """Check whether the current attention config can use the migrated custom FIA op.
+
+        The custom op currently only supports TND layout, sparse_mode 0/3, and does
+        not provide learnable_sink support. Graph capture goes through the
+        host-list task-update path (``full_graph_custom_fia``) when
+        ``custom_fia_config.full_graph`` is set, DecodeOnly only.
+        """
+        fia_config = get_ascend_config().custom_fia_config
+        if not fia_config.enabled:
+            return False
+        if _EXTRA_CTX.capturing:
+            # 图模式：仅显式开启且 DecodeOnly 时放行（task-update 入图路径）；
+            # 其余 capture 场景仍退回 baseline FIA（图内无真跳但正确）。
+            if not (fia_config.full_graph and
+                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
+                return False
+        if self.sinks is not None:
+            return False
+        if self.sliding_window is not None:
+            return False
+        # 全场景单跑 custom：DecodeOnly / PrefillNoCache / ChunkedPrefill
+        # （含 decode+prefill chunk 混合 batch）。PrefillCacheHit /
+        # SpecDecoding 不支持，仍走 baseline。
+        return attn_metadata.attn_state in (
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.PrefillNoCache,
+            AscendAttentionState.ChunkedPrefill,
+        )
+
+    def forward_custom_fused_infer_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        """Forward path through the migrated custom FIA operator.
+
+        This mirrors ``forward_fused_infer_attention`` but calls
+        ``torch.ops._C_ascend.npu_fused_infer_attention_score``, which exposes
+        the BlasST ``sparse_lambda`` parameter directly instead of encoding it
+        via ``antiquant_mode``.
+        """
+        if _EXTRA_CTX.capturing:
+            attn_output, num_tokens = self.full_graph_custom_fia(
+                query, key, value, attn_metadata, output)
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata
+        )
+
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+        if (
+            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and self.attn_type != AttentionType.ENCODER_DECODER
+        ):
+            key = key[:num_tokens]
+            value = value[:num_tokens]
+
+        # The custom op takes host int64 lists for sequence lengths (aligned
+        # with the CANN aclnn FIA interface): tiling reads them via op attrs
+        # with zero D2H, and the torch adapter internally creates the device
+        # copies the kernel reads from GM.
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        if isinstance(actual_seq_lengths_kv, torch.Tensor):
+            actual_seq_lengths_kv = actual_seq_lengths_kv.tolist()
+
+        # Match the baseline (torch_npu) path: always sparse_mode=3 with
+        # attn_mask. sparse_lambda comes from custom_fia_config; -99.0 means
+        # dense (no block skipping).
+        attn_output, _, _ = torch.ops._C_ascend.npu_fused_infer_attention_score(
+            query,
+            key,
+            value,
+            None,  # pse_shift
+            attn_metadata.attn_mask,
+            actual_seq_lengths_q,
+            actual_seq_lengths_kv,
+            block_table,
+            self.num_heads,
+            self.scale,
+            self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
+            2147483647,  # next_tokens
+            "TND",
+            self.num_kv_heads,
+            3,  # sparse_mode
+            0,  # inner_precise
+            block_size,
+            0,  # antiquant_mode
+            get_ascend_config().custom_fia_config.sparse_lambda,
+            False,  # softmax_lse_flag
+            False,  # sparse_stats_flag
+            get_ascend_config().custom_fia_config.host_seq_tiling,
+            get_ascend_config().custom_fia_config.flash_decode,
+        )
+
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
+    def full_graph_custom_fia(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        """custom FIA 的 full-graph capture 路径（镜像 full_graph_fia）。
+
+        与 baseline 的三点差别：
+        - 调 _C_ascend 的 _out 变体（3 输出 + 外部常驻 workspace）；
+        - seq 的 H2D 上传不能出现在 capture/update 流状态（CANN 拒绝，PoC 实测
+          copy params / 507009 报错）：_out 变体内部不拷贝，device 侧 seq 值由
+          每次 update 窗口前的 preload_seq 刷新（cache.dev 地址恒定，capture
+          录制的是地址）；窗口内组里只剩纯 aclnn launch，拓扑恒定；
+        - 图内禁用统计输出（softmax_lse/sparse_stats，host 读 device 在
+          capture/replay 下非法）。
+        """
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata)
+
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        graph_params = get_graph_params()
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        if isinstance(actual_seq_lengths_kv, torch.Tensor):
+            actual_seq_lengths_kv = actual_seq_lengths_kv.tolist()
+
+        # 常驻输出：capture/update/replay 复用同一组地址（task update patch 的
+        # 写出地址必须与 capture 一致）
+        attention_out = torch.empty(query.shape, dtype=query.dtype, device=query.device)
+        softmax_lse = torch.empty(query.shape[0],
+                                  self.num_heads,
+                                  1,
+                                  dtype=torch.float32,
+                                  device=query.device)
+        sparse_stats = torch.empty(2, dtype=torch.int32, device=query.device)
+
+        # 常驻 workspace（按 bucket 缓存）：FD 追加区随 batch 与 kv 增长。
+        # E2E 实测教训（2026-09-01 两次 EngineDead）：aq 是【累积】列表，
+        # 传 [1]*b 会把后 b-1 条 q 算成 0，FD split 区被低估（b=8 需
+        # 92410336 > b=1 kv=256k 的 92381440；Σsplits 上限 26 是全局的但
+        # split 段数随 batch 增多）。上界形态 = 该 bucket 满 batch、每请求
+        # kv=max_model_len、aq=1..b 累积（FD 区对 kv 饱和，probe 实测混合
+        # 分布不超过 uniform max；FD 仅在 numTasks≤20 触发，大 bucket 自动
+        # 退化为 base）。get_workspace 只经 attr 推导，无 H2D，capture 期可调用。
+        workspace = graph_params.workspaces.get(num_tokens)
+        if workspace is None:
+            ws_args = dict(pse_shift=None,
+                           atten_mask=attn_metadata.attn_mask,
+                           blocktable=block_table,
+                           num_heads=self.num_heads,
+                           scale=self.scale,
+                           pre_tokens=SWA_INT_MAX,
+                           next_tokens=2147483647,
+                           input_layout="TND",
+                           num_key_value_heads=self.num_kv_heads,
+                           sparse_mode=3,
+                           inner_precise=0,
+                           block_size=block_size,
+                           antiquant_mode=0,
+                           sparse_lambda=get_ascend_config().custom_fia_config.sparse_lambda,
+                           softmax_lse_flag=False,
+                           sparse_stats_flag=False,
+                           host_seq_tiling=get_ascend_config().custom_fia_config.host_seq_tiling,
+                           flash_decode=get_ascend_config().custom_fia_config.flash_decode)
+            ws_size = torch.ops._C_ascend.npu_fused_infer_attention_score_get_workspace(
+                query, key, value, actual_seq_lengths=actual_seq_lengths_q,
+                actual_seq_lengths_kv=actual_seq_lengths_kv, **ws_args)
+            max_kv = self.vllm_config.model_config.max_model_len
+            # decode bucket：aq 累积 1..b、batch=num_tokens；FD 上界按满
+            # batch×max_kv（tiling 对 FD 区取 max，实测见上注释）
+            ws_size_fd = torch.ops._C_ascend.npu_fused_infer_attention_score_get_workspace(
+                query, key, value,
+                actual_seq_lengths=list(range(1, num_tokens + 1)),
+                actual_seq_lengths_kv=[max_kv] * num_tokens, **ws_args)
+            workspace = torch.empty(max(ws_size, ws_size_fd),
+                                    dtype=torch.uint8,
+                                    device=query.device)
+            update_graph_params_workspaces(num_tokens, workspace)
+
+        # Handle graph capturing mode
+        stream = torch_npu.npu.current_stream()
+        event = torch.npu.ExternalEvent()
+        event.wait(stream)
+        event.reset(stream)
+        graph_params.events[num_tokens].append(event)
+        graph_params.attn_params[num_tokens].append(
+            (
+                "custom_fia",  # update_graph_params 分发标记
+                weak_ref_tensors(query),
+                weak_ref_tensors(key),
+                weak_ref_tensors(value),
+                weak_ref_tensors(block_table),
+                weak_ref_tensors(attn_metadata.attn_mask),
+                block_size,
+                actual_seq_lengths_q,
+                actual_seq_lengths_kv,
+                self.num_kv_heads,
+                self.num_heads,
+                self.scale,
+                weak_ref_tensors(attention_out),
+                weak_ref_tensors(softmax_lse),
+                weak_ref_tensors(sparse_stats),
+            ))
+
+        torch.npu.graph_task_group_begin(stream)
+        torch.ops._C_ascend.npu_fused_infer_attention_score_out(
+            query,
+            key,
+            value,
+            attention_out,
+            softmax_lse,
+            sparse_stats,
+            workspace,
+            None,  # pse_shift
+            attn_metadata.attn_mask,
+            actual_seq_lengths_q,
+            actual_seq_lengths_kv,
+            block_table,
+            self.num_heads,
+            self.scale,
+            SWA_INT_MAX,  # pre_tokens
+            2147483647,  # next_tokens
+            "TND",
+            self.num_kv_heads,
+            3,  # sparse_mode
+            0,  # inner_precise
+            block_size,
+            0,  # antiquant_mode
+            get_ascend_config().custom_fia_config.sparse_lambda,
+            False,  # softmax_lse_flag：图内禁用统计
+            False,  # sparse_stats_flag
+            get_ascend_config().custom_fia_config.host_seq_tiling,
+            get_ascend_config().custom_fia_config.flash_decode,
+        )
+        handle = torch.npu.graph_task_group_end(stream)
+        graph_params.handles[num_tokens].append(handle)
+
+        attn_output = attention_out.view(num_tokens, self.num_heads, self.head_size)
+        return attn_output, num_tokens
+
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -1727,6 +2068,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
         ):
             output = self.forward_paged_attention(query, attn_metadata, output)
+        elif self._can_use_custom_fia(attn_metadata):
+            output = self.forward_custom_fused_infer_attention(
+                query, key, value, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 
