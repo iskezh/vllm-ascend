@@ -17,9 +17,9 @@
 Single-op level, no engine: the custom ``_C_ascend`` op vs an fp32 reference
 for dense / causal / GQA / paged-decode shapes (including the FlashDecode
 shape), and vs the kernel-granularity BlasST golden for sparse-lambda cases.
-Also covers the two op attr switches (``host_seq_tiling`` / ``flash_decode``)
-that replaced the ``VLLM_FIA_*`` environment kill-switches: with the switch
-off the op must still produce correct output through its fallback path.
+Also covers the ``flash_decode`` op attr switch (which replaced the
+``VLLM_FIA_*`` environment kill-switches): with the switch off the op must
+still produce correct output through its non-FD path.
 
 Case design mirrors tests/fused_infer_attention_score/validate_post_cleanup.py
 (the developer-side 14-case suite); this file is the CI-collectable subset.
@@ -27,8 +27,6 @@ Case design mirrors tests/fused_infer_attention_score/validate_post_cleanup.py
 
 import math
 import os
-import sys
-from pathlib import Path
 
 import pytest
 import torch
@@ -43,12 +41,10 @@ import torch_npu  # noqa: F401,E402
 import vllm_ascend.vllm_ascend_C  # noqa: F401,E402
 
 # Kernel-granularity BlasST golden (fp32 simulator mirroring the kernel's
-# skip decisions). Lives outside the e2e tree (tests/fused_infer_attention_
-# score/); import by path and degrade gracefully so collection never breaks.
-_GOLDEN_DIR = Path(_CUR).resolve().parents[2] / "fused_infer_attention_score"
+# skip decisions). Lives next to this file; degrade gracefully so collection
+# never breaks.
 try:
-    sys.path.insert(0, str(_GOLDEN_DIR))
-    from blasst_golden_tnd import BlasstGoldenTND  # noqa: E402
+    from tests.e2e.pull_request.one_card.blasst_golden_tnd import BlasstGoldenTND
 
     _golden_available = True
 except ImportError:
@@ -83,7 +79,7 @@ def _cumsum(lens):
 def run_custom(q, k, v, q_lens, kv_lens, num_heads, num_kv_heads, scale,
                sparse_lambda=DENSE_LAMBDA, causal=False, blocktable=None,
                block_size=0, softmax_lse_flag=True, sparse_stats_flag=False,
-               host_seq_tiling=True, flash_decode=True):
+               flash_decode=True):
     # Op contract (matches attention_v1.py): q lens are prefix sums; kv lens
     # are prefix sums for non-paged, raw per-batch lengths for paged.
     paged = blocktable is not None
@@ -100,7 +96,7 @@ def run_custom(q, k, v, q_lens, kv_lens, num_heads, num_kv_heads, scale,
         block_size=block_size, antiquant_mode=0,
         sparse_lambda=sparse_lambda, softmax_lse_flag=softmax_lse_flag,
         sparse_stats_flag=sparse_stats_flag,
-        host_seq_tiling=host_seq_tiling, flash_decode=flash_decode,
+        flash_decode=flash_decode,
     )
 
 
@@ -241,26 +237,6 @@ def test_paged_decode_flash_decode_disabled(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_paged_decode_host_seq_tiling_off(dtype):
-    # host_seq_tiling=False falls back to D2H seq reads in tiling and must
-    # stay correct (guards the op-attr plumbing that replaced
-    # VLLM_FIA_HOST_SEQ_TILING).
-    bs, Hkv, blk = 2, 4, 128
-    q_lens = [1] * bs
-    kv_lens = [100, 300]
-    q, _, _ = make_varlen(q_lens, [0] * bs, H, Hkv, D, dtype, seed=5)
-    k, v, bt = make_paged(kv_lens, Hkv, D, blk, dtype, seed=5)
-    out, _, _ = run_custom(q, k, v, q_lens, kv_lens, H, Hkv, SCALE,
-                           blocktable=bt, block_size=blk,
-                           host_seq_tiling=False)
-    _assert_precision(
-        out,
-        ref_attention(q, k, v, q_lens, kv_lens, H, Hkv, SCALE,
-                      blocktable=bt, block_size=blk),
-        dtype)
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_paged_decode_regular(dtype):
     # Short kv -> regular paged path (no FD).
     bs, Hkv, blk = 2, 4, 128
@@ -279,9 +255,12 @@ def test_paged_decode_regular(dtype):
 
 @pytest.mark.skipif(not _golden_available, reason="BlasST golden not available")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_blasst_stats(dtype):
-    # Stats mode (detection only, no real skip): the op's skip counters must
-    # match the kernel-granularity golden's decisions.
+def test_blasst_sparse_output_and_stats(dtype):
+    # Real-skip mode with the skip counters exported: output vs the
+    # kernel-granularity golden, and the op's counters must match the
+    # golden's skip decisions. sparse_stats_flag only controls whether the
+    # counters are written to the third output; skipping itself is governed
+    # by sparse_lambda alone.
     lam = -3.0
     q_lens = kv_lens = [640, 1408]
     q, k, v = make_varlen(q_lens, kv_lens, H, H, D, dtype, seed=6)
@@ -291,40 +270,14 @@ def test_blasst_stats(dtype):
     golden = BlasstGoldenTND(num_heads=H, num_key_value_heads=H, head_dim=D,
                              scale=SCALE, block_size=32, sparse_lamda=lam,
                              rowloop_rows=16)
-    _, _, info = golden.forward_blasst_kernel(
+    ref, _, info = golden.forward_blasst_kernel(
         q.float().cpu(), k.float().cpu(), v.float().cpu(),
         torch.tensor(_cumsum(q_lens)), torch.tensor(_cumsum(kv_lens)))
 
-    _, _, stats = run_custom(q, k, v, q_lens, kv_lens, H, H, SCALE,
-                             sparse_lambda=lam, sparse_stats_flag=True)
+    out, _, stats = run_custom(q, k, v, q_lens, kv_lens, H, H, SCALE,
+                               sparse_lambda=lam, sparse_stats_flag=True)
     assert int(stats[0]) == info["skipped_blocks"], (
         f"skipped blocks: custom {int(stats[0])} vs golden {info['skipped_blocks']}")
     assert int(stats[1]) == info["total_blocks"], (
         f"total blocks: custom {int(stats[1])} vs golden {info['total_blocks']}")
-
-
-@pytest.mark.skip(
-    reason="known kernel hang in the real-skip path (sparse_lambda=-3, "
-           "stats off); under bisect via tests/fused_infer_attention_score/"
-           "repro_6b.py. Unskip once the kernel fix lands — stats mode "
-           "(test_blasst_stats) covers the skip decisions until then.")
-@pytest.mark.skipif(not _golden_available, reason="BlasST golden not available")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_blasst_sparse_output(dtype):
-    # Real-skip mode: output vs kernel-granularity golden.
-    lam = -3.0
-    q_lens = kv_lens = [640, 1408]
-    q, k, v = make_varlen(q_lens, kv_lens, H, H, D, dtype, seed=6)
-    b2 = q_lens[0]
-    k[b2:b2 + 512] = (k[b2:b2 + 512].float() * 4.0).to(dtype)
-    k[b2 + 512:] = (k[b2 + 512:].float() * 0.001).to(dtype)
-    golden = BlasstGoldenTND(num_heads=H, num_key_value_heads=H, head_dim=D,
-                             scale=SCALE, block_size=32, sparse_lamda=lam,
-                             rowloop_rows=16)
-    ref, _, _ = golden.forward_blasst_kernel(
-        q.float().cpu(), k.float().cpu(), v.float().cpu(),
-        torch.tensor(_cumsum(q_lens)), torch.tensor(_cumsum(kv_lens)))
-
-    out, _, _ = run_custom(q, k, v, q_lens, kv_lens, H, H, SCALE,
-                           sparse_lambda=lam)
     _assert_precision(out, ref.to(DEVICE), dtype)

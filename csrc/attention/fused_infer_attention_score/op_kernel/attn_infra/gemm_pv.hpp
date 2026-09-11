@@ -90,7 +90,6 @@ public:
     static constexpr uint32_t COORD_DIM2 = 2;
     uint32_t countNum = 0;
     uint32_t sparseNum = 0;
-    bool sparseStatsMode_ = false;
 
     // Check LayoutC
     static_assert(std::is_same_v<LayoutC, layout::RowMajor>, "LayoutC only support RowMajor yet!");
@@ -101,10 +100,9 @@ public:
 
     __aicore__ inline
     void init(Arch::Resource<ArchTag> &resource, uint32_t nDyn, uint32_t kDyn, uint32_t KVStackLen = 512,
-              uint32_t l1BufAddrStart = 0, bool sparseStatsMode = false)
+              uint32_t l1BufAddrStart = 0)
     {
         maxKVStackLen = KVStackLen;
-        sparseStatsMode_ = sparseStatsMode;
         // Allocate L1 memory space
         l1BTensor = resource.l1Buf.template GetBufferByByte<ElementB>(l1BufAddrStart +
             L1TileShape::M * kDyn * sizeof(ElementA) * STAGES);
@@ -228,7 +226,7 @@ public:
         if (sp_flag_res) {
             sparseNum++;
         }
-        if (sp_flag_res && !sparseStatsMode_) {
+        if (sp_flag_res) {
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID4);
             return;
         }

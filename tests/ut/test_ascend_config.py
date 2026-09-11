@@ -115,28 +115,25 @@ class TestCustomFIAConfig(TestBase):
         self.assertFalse(defaults.enabled)
         self.assertEqual(defaults.sparse_lambda, -99.0)
         self.assertFalse(defaults.full_graph)
-        # Op-behavior switches default on (former env kill-switches
-        # VLLM_FIA_HOST_SEQ_TILING / VLLM_FIA_FD defaulted to enabled).
-        self.assertTrue(defaults.host_seq_tiling)
+        # Op-behavior switch defaults on (former env kill-switch VLLM_FIA_FD
+        # defaulted to enabled).
         self.assertTrue(defaults.flash_decode)
 
         explicit = CustomFIAConfig(
             enabled=True, sparse_lambda=-3.0, full_graph=True,
-            host_seq_tiling=False, flash_decode=False,
+            flash_decode=False,
         )
         self.assertTrue(explicit.enabled)
         self.assertEqual(explicit.sparse_lambda, -3.0)
         self.assertTrue(explicit.full_graph)
-        self.assertFalse(explicit.host_seq_tiling)
         self.assertFalse(explicit.flash_decode)
 
     def test_lax_bool_and_unknown_key(self):
         config = CustomFIAConfig(  # type: ignore[arg-type]
-            enabled="true", host_seq_tiling="false", flash_decode="0"
+            enabled="true", flash_decode="0"
         )
 
         self.assertTrue(config.enabled)
-        self.assertFalse(config.host_seq_tiling)
         self.assertFalse(config.flash_decode)
         with self.assertRaises(ValueError):
             CustomFIAConfig(quant=False)  # type: ignore[call-arg]

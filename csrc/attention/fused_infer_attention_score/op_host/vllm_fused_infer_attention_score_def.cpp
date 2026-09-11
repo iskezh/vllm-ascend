@@ -87,10 +87,9 @@ public:
         this->Attr("actual_seq_lengths_q_host").AttrType(OPTIONAL).ListInt({});
         this->Attr("actual_seq_lengths_kv_host").AttrType(OPTIONAL).ListInt({});
         this->Attr("sparse_stats_flag").AttrType(OPTIONAL).Bool(false);
-        // Behavior switches fed from vllm_ascend CustomFIAConfig (host_seq_tiling
-        // / flash_decode). Previously getenv("VLLM_FIA_*") kill-switches; attrs
-        // keep them reviewable, per-call, and graph-capture deterministic.
-        this->Attr("host_seq_tiling").AttrType(OPTIONAL).Bool(true);
+        // Behavior switch fed from vllm_ascend CustomFIAConfig.flash_decode.
+        // (Former getenv kill-switch VLLM_FIA_FD; an attr keeps it reviewable,
+        // per-call, and graph-capture deterministic.)
         this->Attr("flash_decode").AttrType(OPTIONAL).Bool(true);
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)

@@ -1,0 +1,256 @@
+[W907 22:13:54.759190130 NPUCachingAllocator.cpp:202] Warning: The current CANN and HDK(driver) versions require processing for 32 padding size, with memory allocation. (function operator())
+
+=== sparse lam=-3 q/kv=[640, 1408] (fp16) ===
+aggregate: sparse_blocks=352 total_blocks=688
+-- cube cores --
+cube[ 0] taskCycles=10057 loadQ=20 qk=2982 pv=6918 stacks=51 tasks=11
+cube[ 1] taskCycles=9819 loadQ=16 qk=2579 pv=7116 stacks=51 tasks=11
+cube[ 2] taskCycles=10064 loadQ=14 qk=2891 pv=7042 stacks=51 tasks=11
+cube[ 3] taskCycles=9565 loadQ=20 qk=2354 pv=7079 stacks=51 tasks=11
+cube[ 4] taskCycles=9616 loadQ=15 qk=2546 pv=6939 stacks=51 tasks=11
+cube[ 5] taskCycles=9458 loadQ=14 qk=2495 pv=6831 stacks=51 tasks=11
+cube[ 6] taskCycles=9590 loadQ=17 qk=2640 pv=6807 stacks=51 tasks=11
+cube[ 7] taskCycles=9751 loadQ=12 qk=2424 pv=7195 stacks=51 tasks=11
+cube[ 8] taskCycles=10476 loadQ=15 qk=3124 pv=7224 stacks=52 tasks=11
+cube[ 9] taskCycles=10399 loadQ=16 qk=2982 pv=7285 stacks=52 tasks=11
+cube[10] taskCycles=10186 loadQ=15 qk=2743 pv=7284 stacks=52 tasks=11
+cube[11] taskCycles=10469 loadQ=13 qk=3367 pv=6969 stacks=52 tasks=11
+cube[12] taskCycles=10377 loadQ=16 qk=3380 pv=6869 stacks=52 tasks=11
+cube[13] taskCycles=10162 loadQ=14 qk=2972 pv=7060 stacks=52 tasks=11
+cube[14] taskCycles=10273 loadQ=14 qk=2656 pv=7489 stacks=52 tasks=11
+cube[15] taskCycles=10049 loadQ=13 qk=2745 pv=7166 stacks=52 tasks=11
+cube[16] taskCycles=9213 loadQ=12 qk=2503 pv=6563 stacks=47 tasks=10
+cube[17] taskCycles=9530 loadQ=13 qk=3187 pv=6223 stacks=47 tasks=10
+cube[18] taskCycles=9194 loadQ=14 qk=2615 pv=6462 stacks=47 tasks=10
+cube[19] taskCycles=9287 loadQ=11 qk=2456 pv=6713 stacks=47 tasks=10
+cube[20] taskCycles=9281 loadQ=13 qk=2897 pv=6261 stacks=47 tasks=10
+cube[21] taskCycles=9099 loadQ=14 qk=2888 pv=6093 stacks=47 tasks=10
+cube[22] taskCycles=9049 loadQ=12 qk=2569 pv=6360 stacks=47 tasks=10
+cube[23] taskCycles=9323 loadQ=11 qk=2990 pv=6222 stacks=47 tasks=10
+cube  Σ  taskCycles=234287 loadQ=344 qk=66985 pv=164170 stacks=1200 tasks=256
+-- vec cores (sub-block level) --
+vec[ 0.0] taskCycles=10311 waitQk=2029 softmax=4103 spFlag=1460 waitPv=1517 rescale=1027 stacks=51 tasks=11
+vec[ 0.1] taskCycles=10367 waitQk=2034 softmax=4180 spFlag=1445 waitPv=1418 rescale=1111 stacks=51 tasks=11
+vec[ 1.0] taskCycles=10320 waitQk=1994 softmax=4147 spFlag=1452 waitPv=1513 rescale=1030 stacks=51 tasks=11
+vec[ 1.1] taskCycles=10190 waitQk=1837 softmax=4108 spFlag=1495 waitPv=1518 rescale=1061 stacks=51 tasks=11
+vec[ 2.0] taskCycles=10084 waitQk=1642 softmax=4121 spFlag=1490 waitPv=1807 rescale=846 stacks=51 tasks=11
+vec[ 2.1] taskCycles=10274 waitQk=1861 softmax=3998 spFlag=1456 waitPv=1985 rescale=785 stacks=51 tasks=11
+vec[ 3.0] taskCycles=9748 waitQk=1448 softmax=4310 spFlag=1511 waitPv=1398 rescale=906 stacks=51 tasks=11
+vec[ 3.1] taskCycles=9438 waitQk=1054 softmax=4276 spFlag=1510 waitPv=1422 rescale=993 stacks=51 tasks=11
+vec[ 4.0] taskCycles=10075 waitQk=1734 softmax=4176 spFlag=1470 waitPv=1594 rescale=928 stacks=51 tasks=11
+vec[ 4.1] taskCycles=9978 waitQk=1614 softmax=4150 spFlag=1434 waitPv=1654 rescale=952 stacks=51 tasks=11
+vec[ 5.0] taskCycles=10103 waitQk=1896 softmax=4148 spFlag=1418 waitPv=1476 rescale=935 stacks=51 tasks=11
+vec[ 5.1] taskCycles=9849 waitQk=1613 softmax=4153 spFlag=1437 waitPv=1464 rescale=1001 stacks=51 tasks=11
+vec[ 6.0] taskCycles=10277 waitQk=1815 softmax=4000 spFlag=1438 waitPv=1634 rescale=947 stacks=51 tasks=11
+vec[ 6.1] taskCycles=10268 waitQk=1759 softmax=4090 spFlag=1478 waitPv=1469 rescale=1026 stacks=51 tasks=11
+vec[ 7.0] taskCycles=10103 waitQk=1612 softmax=4192 spFlag=1642 waitPv=1533 rescale=940 stacks=51 tasks=11
+vec[ 7.1] taskCycles=10059 waitQk=1519 softmax=4304 spFlag=1536 waitPv=1495 rescale=1019 stacks=51 tasks=11
+vec[ 8.0] taskCycles=10812 waitQk=1886 softmax=4548 spFlag=1437 waitPv=1735 rescale=1015 stacks=52 tasks=11
+vec[ 8.1] taskCycles=10806 waitQk=1919 softmax=4556 spFlag=1464 waitPv=1715 rescale=956 stacks=52 tasks=11
+vec[ 9.0] taskCycles=10710 waitQk=1855 softmax=4691 spFlag=1475 waitPv=1473 rescale=1031 stacks=52 tasks=11
+vec[ 9.1] taskCycles=10737 waitQk=1833 softmax=4646 spFlag=1483 waitPv=1519 rescale=1064 stacks=52 tasks=11
+vec[10.0] taskCycles=10424 waitQk=1606 softmax=4739 spFlag=1505 waitPv=1421 rescale=967 stacks=52 tasks=11
+vec[10.1] taskCycles=10104 waitQk=1345 softmax=4457 spFlag=1556 waitPv=1651 rescale=894 stacks=52 tasks=11
+vec[11.0] taskCycles=10827 waitQk=2186 softmax=4387 spFlag=1477 waitPv=1540 rescale=1048 stacks=52 tasks=11
+vec[11.1] taskCycles=10801 waitQk=2083 softmax=4503 spFlag=1414 waitPv=1448 rescale=1166 stacks=52 tasks=11
+vec[12.0] taskCycles=10737 waitQk=2118 softmax=4439 spFlag=1616 waitPv=1634 rescale=745 stacks=52 tasks=11
+vec[12.1] taskCycles=10754 waitQk=2092 softmax=4408 spFlag=1427 waitPv=1840 rescale=794 stacks=52 tasks=11
+vec[13.0] taskCycles=10565 waitQk=1783 softmax=4666 spFlag=1423 waitPv=1486 rescale=1011 stacks=52 tasks=11
+vec[13.1] taskCycles=10540 waitQk=1731 softmax=4472 spFlag=1410 waitPv=1657 rescale=1081 stacks=52 tasks=11
+vec[14.0] taskCycles=10556 waitQk=1718 softmax=4527 spFlag=1385 waitPv=1759 rescale=982 stacks=52 tasks=11
+vec[14.1] taskCycles=10066 waitQk=1172 softmax=4691 spFlag=1474 waitPv=1493 rescale=1048 stacks=52 tasks=11
+vec[15.0] taskCycles=10423 waitQk=1846 softmax=4494 spFlag=1458 waitPv=1430 rescale=1015 stacks=52 tasks=11
+vec[15.1] taskCycles=10454 waitQk=1902 softmax=4507 spFlag=1520 waitPv=1390 rescale=944 stacks=52 tasks=11
+vec[16.0] taskCycles=9439 waitQk=1451 softmax=4154 spFlag=1457 waitPv=1359 rescale=845 stacks=47 tasks=10
+vec[16.1] taskCycles=9195 waitQk=1180 softmax=4007 spFlag=1295 waitPv=1674 rescale=868 stacks=47 tasks=10
+vec[17.0] taskCycles=9795 waitQk=2036 softmax=3962 spFlag=1356 waitPv=1307 rescale=957 stacks=47 tasks=10
+vec[17.1] taskCycles=9780 waitQk=1990 softmax=3922 spFlag=1288 waitPv=1427 rescale=984 stacks=47 tasks=10
+vec[18.0] taskCycles=9636 waitQk=1704 softmax=4071 spFlag=1352 waitPv=1465 rescale=884 stacks=47 tasks=10
+vec[18.1] taskCycles=9631 waitQk=1673 softmax=4056 spFlag=1315 waitPv=1493 rescale=922 stacks=47 tasks=10
+vec[19.0] taskCycles=9548 waitQk=1430 softmax=4280 spFlag=1382 waitPv=1382 rescale=899 stacks=47 tasks=10
+vec[19.1] taskCycles=9304 waitQk=1164 softmax=4226 spFlag=1355 waitPv=1459 rescale=939 stacks=47 tasks=10
+vec[20.0] taskCycles=9697 waitQk=1996 softmax=3930 spFlag=1279 waitPv=1505 rescale=822 stacks=47 tasks=10
+vec[20.1] taskCycles=9691 waitQk=1964 softmax=3952 spFlag=1415 waitPv=1356 rescale=835 stacks=47 tasks=10
+vec[21.0] taskCycles=9554 waitQk=1935 softmax=3928 spFlag=1308 waitPv=1328 rescale=890 stacks=47 tasks=10
+vec[21.1] taskCycles=9603 waitQk=1999 softmax=3906 spFlag=1311 waitPv=1373 rescale=847 stacks=47 tasks=10
+vec[22.0] taskCycles=9259 waitQk=1549 softmax=4045 spFlag=1337 waitPv=1310 rescale=848 stacks=47 tasks=10
+vec[22.1] taskCycles=9257 waitQk=1520 softmax=4030 spFlag=1338 waitPv=1321 rescale=878 stacks=47 tasks=10
+vec[23.0] taskCycles=9515 waitQk=1729 softmax=3913 spFlag=1367 waitPv=1446 rescale=882 stacks=47 tasks=10
+vec[23.1] taskCycles=9522 waitQk=1688 softmax=3968 spFlag=1355 waitPv=1386 rescale=964 stacks=47 tasks=10
+vec   Σ  taskCycles=483186 waitQk=83544 softmax=203537 spFlag=68706 waitPv=72679 rescale=45532 stacks=2400 tasks=512
+
+=== causal prefill 4x2048 (fp16, dense) ===
+aggregate: sparse_blocks=0 total_blocks=2560
+-- cube cores --
+cube[ 0] taskCycles=38096 loadQ=62 qk=7744 pv=29857 stacks=193 tasks=43
+cube[ 1] taskCycles=38157 loadQ=59 qk=7760 pv=29904 stacks=193 tasks=43
+cube[ 2] taskCycles=38198 loadQ=60 qk=7937 pv=29755 stacks=193 tasks=43
+cube[ 3] taskCycles=37433 loadQ=50 qk=7527 pv=29397 stacks=193 tasks=43
+cube[ 4] taskCycles=37440 loadQ=55 qk=7616 pv=29320 stacks=193 tasks=43
+cube[ 5] taskCycles=37527 loadQ=54 qk=7517 pv=29510 stacks=193 tasks=43
+cube[ 6] taskCycles=37567 loadQ=51 qk=7583 pv=29492 stacks=193 tasks=43
+cube[ 7] taskCycles=37955 loadQ=54 qk=7528 pv=29919 stacks=193 tasks=43
+cube[ 8] taskCycles=38108 loadQ=55 qk=7672 pv=29942 stacks=194 tasks=43
+cube[ 9] taskCycles=38232 loadQ=56 qk=7976 pv=29737 stacks=194 tasks=43
+cube[10] taskCycles=37521 loadQ=57 qk=7716 pv=29302 stacks=194 tasks=43
+cube[11] taskCycles=37924 loadQ=52 qk=7714 pv=29702 stacks=194 tasks=43
+cube[12] taskCycles=37668 loadQ=53 qk=7602 pv=29569 stacks=194 tasks=43
+cube[13] taskCycles=38204 loadQ=53 qk=7590 pv=30115 stacks=194 tasks=43
+cube[14] taskCycles=38596 loadQ=61 qk=7917 pv=30186 stacks=194 tasks=43
+cube[15] taskCycles=38506 loadQ=57 qk=8090 pv=29915 stacks=194 tasks=43
+cube[16] taskCycles=37417 loadQ=53 qk=7587 pv=29341 stacks=189 tasks=42
+cube[17] taskCycles=37121 loadQ=54 qk=7455 pv=29179 stacks=189 tasks=42
+cube[18] taskCycles=36613 loadQ=51 qk=7467 pv=28659 stacks=189 tasks=42
+cube[19] taskCycles=37357 loadQ=53 qk=7704 pv=29170 stacks=189 tasks=42
+cube[20] taskCycles=37294 loadQ=52 qk=7478 pv=29325 stacks=189 tasks=42
+cube[21] taskCycles=37209 loadQ=55 qk=7389 pv=29334 stacks=189 tasks=42
+cube[22] taskCycles=37205 loadQ=56 qk=7405 pv=29320 stacks=189 tasks=42
+cube[23] taskCycles=36821 loadQ=55 qk=7318 pv=29021 stacks=189 tasks=42
+cube[24] taskCycles=1088205328 loadQ=1088643113 qk=1088423032 pv=1088458092 stacks=1088230860 tasks=1088465916
+cube[25] taskCycles=1088158798 loadQ=1088436810 qk=1088316622 pv=1088321940 stacks=1088498452 tasks=1088409932
+cube[26] taskCycles=1088461446 loadQ=1088306163 qk=1088165706 pv=1088436000 stacks=1088341129 tasks=1088076142
+cube[27] taskCycles=1088365580 loadQ=1088474290 qk=1088408495 pv=1088142378 stacks=1088253106 tasks=1088377106
+cube[28] taskCycles=1088237968 loadQ=1088271374 qk=1088505768 pv=1088154633 stacks=1088337613 tasks=1088158694
+cube[29] taskCycles=1088470470 loadQ=1088416637 qk=1088425579 pv=1088385831 stacks=1088458444 tasks=1088321864
+cube  Σ  taskCycles=6530803759 loadQ=6530549705 qk=6530428494 pv=6530607845 stacks=6530124212 tasks=6529810678
+-- vec cores (sub-block level) --
+vec[ 0.0] taskCycles=37734 waitQk=2387 softmax=17715 spFlag=6996 waitPv=4867 rescale=4366 stacks=193 tasks=43
+vec[ 0.1] taskCycles=37830 waitQk=2293 softmax=18072 spFlag=6888 waitPv=4735 rescale=4641 stacks=193 tasks=43
+vec[ 1.0] taskCycles=37859 waitQk=1703 softmax=17462 spFlag=6987 waitPv=6353 rescale=4206 stacks=193 tasks=43
+vec[ 1.1] taskCycles=37724 waitQk=1524 softmax=17889 spFlag=6858 waitPv=5739 rescale=4525 stacks=193 tasks=43
+vec[ 2.0] taskCycles=37650 waitQk=1923 softmax=17924 spFlag=7060 waitPv=4912 rescale=4586 stacks=193 tasks=43
+vec[ 2.1] taskCycles=37731 waitQk=2141 softmax=17525 spFlag=6981 waitPv=5430 rescale=4450 stacks=193 tasks=43
+vec[ 3.0] taskCycles=37036 waitQk=2043 softmax=17614 spFlag=7000 waitPv=4903 rescale=4257 stacks=193 tasks=43
+vec[ 3.1] taskCycles=37220 waitQk=1891 softmax=17608 spFlag=6970 waitPv=4743 rescale=4512 stacks=193 tasks=43
+vec[ 4.0] taskCycles=37331 waitQk=2174 softmax=17452 spFlag=6702 waitPv=4993 rescale=4433 stacks=193 tasks=43
+vec[ 4.1] taskCycles=37289 waitQk=2015 softmax=18131 spFlag=6806 waitPv=4465 rescale=4600 stacks=193 tasks=43
+vec[ 5.0] taskCycles=37415 waitQk=1840 softmax=18064 spFlag=6867 waitPv=4904 rescale=4350 stacks=193 tasks=43
+vec[ 5.1] taskCycles=37333 waitQk=1662 softmax=17878 spFlag=6973 waitPv=4860 rescale=4539 stacks=193 tasks=43
+vec[ 6.0] taskCycles=37439 waitQk=2185 softmax=17620 spFlag=6920 waitPv=5012 rescale=4287 stacks=193 tasks=43
+vec[ 6.1] taskCycles=37430 waitQk=2087 softmax=17717 spFlag=7013 waitPv=4601 rescale=4462 stacks=193 tasks=43
+vec[ 7.0] taskCycles=37692 waitQk=1667 softmax=17418 spFlag=7014 waitPv=5804 rescale=4269 stacks=193 tasks=43
+vec[ 7.1] taskCycles=37659 waitQk=1546 softmax=18127 spFlag=7063 waitPv=5124 rescale=4569 stacks=193 tasks=43
+vec[ 8.0] taskCycles=37760 waitQk=1838 softmax=18250 spFlag=6992 waitPv=4984 rescale=4498 stacks=194 tasks=43
+vec[ 8.1] taskCycles=37823 waitQk=1990 softmax=18237 spFlag=7001 waitPv=4925 rescale=4429 stacks=194 tasks=43
+vec[ 9.0] taskCycles=37900 waitQk=1809 softmax=18391 spFlag=6955 waitPv=4677 rescale=4807 stacks=194 tasks=43
+vec[ 9.1] taskCycles=37930 waitQk=1866 softmax=18216 spFlag=6835 waitPv=4892 rescale=4835 stacks=194 tasks=43
+vec[10.0] taskCycles=37215 waitQk=2136 softmax=17853 spFlag=6917 waitPv=4786 rescale=4298 stacks=194 tasks=43
+vec[10.1] taskCycles=37156 waitQk=1942 softmax=18149 spFlag=6895 waitPv=4378 rescale=4583 stacks=194 tasks=43
+vec[11.0] taskCycles=37594 waitQk=1926 softmax=17992 spFlag=6799 waitPv=5167 rescale=4497 stacks=194 tasks=43
+vec[11.1] taskCycles=37589 waitQk=1810 softmax=18129 spFlag=6721 waitPv=5080 rescale=4589 stacks=194 tasks=43
+vec[12.0] taskCycles=37332 waitQk=2213 softmax=17918 spFlag=6792 waitPv=4816 rescale=4386 stacks=194 tasks=43
+vec[12.1] taskCycles=37330 waitQk=2039 softmax=18290 spFlag=6816 waitPv=4271 rescale=4713 stacks=194 tasks=43
+vec[13.0] taskCycles=37831 waitQk=1547 softmax=18005 spFlag=6857 waitPv=5687 rescale=4542 stacks=194 tasks=43
+vec[13.1] taskCycles=37715 waitQk=1447 softmax=18403 spFlag=6778 waitPv=5177 rescale=4678 stacks=194 tasks=43
+vec[14.0] taskCycles=38291 waitQk=2006 softmax=18211 spFlag=6716 waitPv=5865 rescale=4260 stacks=194 tasks=43
+vec[14.1] taskCycles=38234 waitQk=1768 softmax=18595 spFlag=6778 waitPv=5268 rescale=4582 stacks=194 tasks=43
+vec[15.0] taskCycles=37986 waitQk=2347 softmax=18554 spFlag=6854 waitPv=4423 rescale=4587 stacks=194 tasks=43
+vec[15.1] taskCycles=38099 waitQk=2504 softmax=18184 spFlag=6739 waitPv=5002 rescale=4410 stacks=194 tasks=43
+vec[16.0] taskCycles=37079 waitQk=1919 softmax=18045 spFlag=6673 waitPv=4678 rescale=4516 stacks=189 tasks=42
+vec[16.1] taskCycles=36973 waitQk=1733 softmax=18048 spFlag=6670 waitPv=4614 rescale=4688 stacks=189 tasks=42
+vec[17.0] taskCycles=36692 waitQk=2180 softmax=17925 spFlag=6723 waitPv=4347 rescale=4299 stacks=189 tasks=42
+vec[17.1] taskCycles=36677 waitQk=2025 softmax=18148 spFlag=6691 waitPv=4128 rescale=4474 stacks=189 tasks=42
+vec[18.0] taskCycles=36281 waitQk=2287 softmax=17391 spFlag=6727 waitPv=4331 rescale=4345 stacks=189 tasks=42
+vec[18.1] taskCycles=36191 waitQk=2082 softmax=17776 spFlag=6648 waitPv=3900 rescale=4598 stacks=189 tasks=42
+vec[19.0] taskCycles=36981 waitQk=1855 softmax=17869 spFlag=6620 waitPv=5116 rescale=4357 stacks=189 tasks=42
+vec[19.1] taskCycles=36981 waitQk=1743 softmax=18141 spFlag=6539 waitPv=4848 rescale=4470 stacks=189 tasks=42
+vec[20.0] taskCycles=36857 waitQk=2294 softmax=17670 spFlag=6734 waitPv=4595 rescale=4359 stacks=189 tasks=42
+vec[20.1] taskCycles=36801 waitQk=2074 softmax=18124 spFlag=6613 waitPv=4067 rescale=4733 stacks=189 tasks=42
+vec[21.0] taskCycles=36672 waitQk=1518 softmax=18113 spFlag=6566 waitPv=4635 rescale=4632 stacks=189 tasks=42
+vec[21.1] taskCycles=36752 waitQk=1724 softmax=17778 spFlag=6755 waitPv=4948 rescale=4322 stacks=189 tasks=42
+vec[22.0] taskCycles=36784 waitQk=1713 softmax=17795 spFlag=6677 waitPv=4972 rescale=4396 stacks=189 tasks=42
+vec[22.1] taskCycles=36754 waitQk=1541 softmax=18013 spFlag=6678 waitPv=4795 rescale=4502 stacks=189 tasks=42
+vec[23.0] taskCycles=36364 waitQk=2128 softmax=17184 spFlag=6905 waitPv=4785 rescale=4230 stacks=189 tasks=42
+vec[23.1] taskCycles=36366 waitQk=2014 softmax=17597 spFlag=6845 waitPv=4457 rescale=4293 stacks=189 tasks=42
+vec[24.0] taskCycles=1088542421 waitQk=1088449586 softmax=1088489274 spFlag=1088180856 waitPv=1088454556 rescale=1088449074 stacks=1088186575 tasks=1088716091
+vec[24.1] taskCycles=1088717130 waitQk=1088515789 softmax=1088393572 spFlag=1088347430 waitPv=1088499280 rescale=1088282288 stacks=1088412148 tasks=1088384705
+vec[25.0] taskCycles=1088299345 waitQk=1088460996 softmax=1088366744 spFlag=1088373934 waitPv=1088043982 rescale=1088372117 stacks=1088407434 tasks=1088613793
+vec[25.1] taskCycles=1088426025 waitQk=1088391750 softmax=1088251942 spFlag=1088187777 waitPv=1088683312 rescale=1088153274 stacks=1088237879 tasks=1088263852
+vec[26.0] taskCycles=1088298336 waitQk=1088691642 softmax=1088709216 spFlag=1088133478 waitPv=1088429340 rescale=1088511114 stacks=1088388606 tasks=1088122758
+vec[26.1] taskCycles=1088206420 waitQk=1088114960 softmax=1088385832 spFlag=1088541474 waitPv=1088493486 rescale=1088297672 stacks=1088257438 tasks=1088454564
+vec[27.0] taskCycles=1088078788 waitQk=1088161965 softmax=1088184758 spFlag=1088354402 waitPv=1087899393 rescale=1088487939 stacks=1087986416 tasks=1088405162
+vec[27.1] taskCycles=1088037653 waitQk=1088472238 softmax=1088265091 spFlag=1088253501 waitPv=1088200019 rescale=1088295166 stacks=1088123656 tasks=1088396172
+vec[28.0] taskCycles=1088114060 waitQk=1088101818 softmax=1088247584 spFlag=1088236554 waitPv=1088147840 rescale=1088368725 stacks=1088408224 tasks=1087958031
+vec[28.1] taskCycles=1088389820 waitQk=1088097575 softmax=1088461479 spFlag=1088055731 waitPv=1088588524 rescale=1088268593 stacks=1088510041 tasks=1088322092
+vec[29.0] taskCycles=1088192488 waitQk=1088310061 softmax=1088321264 spFlag=1088363440 waitPv=1088641843 rescale=1088198131 stacks=1088506112 tasks=1088626265
+vec[29.1] taskCycles=1088283989 waitQk=1088630672 softmax=1088619002 spFlag=1088447692 waitPv=1088503310 rescale=1088098872 stacks=1088455416 tasks=1087965709
+vec   Σ  taskCycles=13061377837 waitQk=13060492151 softmax=13061556968 spFlag=13059803876 waitPv=13060818944 rescale=13059997925 stacks=13059889161 tasks=13060231242
+
+=== causal prefill 1x2048 (fp16, dense) ===
+aggregate: sparse_blocks=0 total_blocks=640
+-- cube cores --
+cube[ 0] taskCycles=10338 loadQ=13 qk=2051 pv=8164 stacks=49 tasks=11
+cube[ 1] taskCycles=10203 loadQ=15 qk=1968 pv=8112 stacks=49 tasks=11
+cube[ 2] taskCycles=10189 loadQ=13 qk=1878 pv=8184 stacks=49 tasks=11
+cube[ 3] taskCycles=10005 loadQ=13 qk=1867 pv=8019 stacks=49 tasks=11
+cube[ 4] taskCycles=9963 loadQ=13 qk=1907 pv=7931 stacks=49 tasks=11
+cube[ 5] taskCycles=10035 loadQ=13 qk=1863 pv=8047 stacks=49 tasks=11
+cube[ 6] taskCycles=9810 loadQ=12 qk=1870 pv=7819 stacks=49 tasks=11
+cube[ 7] taskCycles=10016 loadQ=14 qk=1865 pv=8024 stacks=49 tasks=11
+cube[ 8] taskCycles=10385 loadQ=14 qk=2142 pv=8114 stacks=50 tasks=11
+cube[ 9] taskCycles=10439 loadQ=14 qk=2159 pv=8156 stacks=50 tasks=11
+cube[10] taskCycles=10279 loadQ=14 qk=2002 pv=8146 stacks=50 tasks=11
+cube[11] taskCycles=10650 loadQ=15 qk=2144 pv=8381 stacks=50 tasks=11
+cube[12] taskCycles=10705 loadQ=14 qk=2187 pv=8393 stacks=50 tasks=11
+cube[13] taskCycles=10598 loadQ=16 qk=2170 pv=8300 stacks=50 tasks=11
+cube[14] taskCycles=10360 loadQ=14 qk=2008 pv=8229 stacks=50 tasks=11
+cube[15] taskCycles=10357 loadQ=13 qk=2215 pv=8014 stacks=50 tasks=11
+cube[16] taskCycles=9451 loadQ=11 qk=1908 pv=7425 stacks=45 tasks=10
+cube[17] taskCycles=9552 loadQ=13 qk=1809 pv=7632 stacks=45 tasks=10
+cube[18] taskCycles=9658 loadQ=10 qk=1846 pv=7702 stacks=45 tasks=10
+cube[19] taskCycles=9605 loadQ=12 qk=1847 pv=7645 stacks=45 tasks=10
+cube[20] taskCycles=9593 loadQ=11 qk=1873 pv=7606 stacks=45 tasks=10
+cube[21] taskCycles=9478 loadQ=11 qk=1793 pv=7575 stacks=45 tasks=10
+cube[22] taskCycles=9610 loadQ=10 qk=1829 pv=7669 stacks=45 tasks=10
+cube[23] taskCycles=9572 loadQ=12 qk=1831 pv=7628 stacks=45 tasks=10
+cube  Σ  taskCycles=240851 loadQ=310 qk=47032 pv=190915 stacks=1152 tasks=256
+-- vec cores (sub-block level) --
+vec[ 0.0] taskCycles=10515 waitQk=516 softmax=4881 spFlag=2035 waitPv=1618 rescale=1181 stacks=49 tasks=11
+vec[ 0.1] taskCycles=10440 waitQk=472 softmax=5009 spFlag=1758 waitPv=1670 rescale=1228 stacks=49 tasks=11
+vec[ 1.0] taskCycles=10147 waitQk=538 softmax=4625 spFlag=1975 waitPv=1610 rescale=1081 stacks=49 tasks=11
+vec[ 1.1] taskCycles=10064 waitQk=502 softmax=4582 spFlag=2080 waitPv=1447 rescale=1150 stacks=49 tasks=11
+vec[ 2.0] taskCycles=10006 waitQk=461 softmax=4593 spFlag=2119 waitPv=1337 rescale=1186 stacks=49 tasks=11
+vec[ 2.1] taskCycles=10012 waitQk=505 softmax=4569 spFlag=2128 waitPv=1382 rescale=1137 stacks=49 tasks=11
+vec[ 3.0] taskCycles=9963 waitQk=397 softmax=4597 spFlag=2143 waitPv=1372 rescale=1156 stacks=49 tasks=11
+vec[ 3.1] taskCycles=9767 waitQk=354 softmax=4489 spFlag=2032 waitPv=1389 rescale=1190 stacks=49 tasks=11
+vec[ 4.0] taskCycles=9769 waitQk=524 softmax=4497 spFlag=1971 waitPv=1434 rescale=1047 stacks=49 tasks=11
+vec[ 4.1] taskCycles=9890 waitQk=435 softmax=4677 spFlag=1926 waitPv=1409 rescale=1147 stacks=49 tasks=11
+vec[ 5.0] taskCycles=10113 waitQk=335 softmax=4871 spFlag=1822 waitPv=1553 rescale=1228 stacks=49 tasks=11
+vec[ 5.1] taskCycles=10024 waitQk=288 softmax=4777 spFlag=1898 waitPv=1487 rescale=1273 stacks=49 tasks=11
+vec[ 6.0] taskCycles=10030 waitQk=355 softmax=5085 spFlag=1756 waitPv=1339 rescale=1174 stacks=49 tasks=11
+vec[ 6.1] taskCycles=10134 waitQk=294 softmax=5170 spFlag=1697 waitPv=1380 rescale=1295 stacks=49 tasks=11
+vec[ 7.0] taskCycles=10046 waitQk=479 softmax=4916 spFlag=1786 waitPv=1393 rescale=1175 stacks=49 tasks=11
+vec[ 7.1] taskCycles=10043 waitQk=405 softmax=5101 spFlag=1780 waitPv=1174 rescale=1273 stacks=49 tasks=11
+vec[ 8.0] taskCycles=10594 waitQk=410 softmax=5190 spFlag=1950 waitPv=1477 rescale=1277 stacks=50 tasks=11
+vec[ 8.1] taskCycles=10634 waitQk=521 softmax=5255 spFlag=1764 waitPv=1568 rescale=1228 stacks=50 tasks=11
+vec[ 9.0] taskCycles=10565 waitQk=507 softmax=5139 spFlag=1822 waitPv=1436 rescale=1354 stacks=50 tasks=11
+vec[ 9.1] taskCycles=10549 waitQk=515 softmax=5054 spFlag=1819 waitPv=1614 rescale=1250 stacks=50 tasks=11
+vec[10.0] taskCycles=10391 waitQk=525 softmax=5272 spFlag=1698 waitPv=1362 rescale=1227 stacks=50 tasks=11
+vec[10.1] taskCycles=10350 waitQk=520 softmax=5308 spFlag=1778 waitPv=1181 rescale=1269 stacks=50 tasks=11
+vec[11.0] taskCycles=10712 waitQk=593 softmax=5496 spFlag=1801 waitPv=1362 rescale=1162 stacks=50 tasks=11
+vec[11.1] taskCycles=10546 waitQk=605 softmax=5086 spFlag=1843 waitPv=1482 rescale=1235 stacks=50 tasks=11
+vec[12.0] taskCycles=10697 waitQk=691 softmax=5358 spFlag=1764 waitPv=1453 rescale=1116 stacks=50 tasks=11
+vec[12.1] taskCycles=10373 waitQk=644 softmax=5032 spFlag=1904 waitPv=1341 rescale=1143 stacks=50 tasks=11
+vec[13.0] taskCycles=10452 waitQk=562 softmax=5009 spFlag=1913 waitPv=1559 rescale=1096 stacks=50 tasks=11
+vec[13.1] taskCycles=10817 waitQk=480 softmax=5569 spFlag=1862 waitPv=1451 rescale=1146 stacks=50 tasks=11
+vec[14.0] taskCycles=10448 waitQk=498 softmax=5204 spFlag=1932 waitPv=1255 rescale=1267 stacks=50 tasks=11
+vec[14.1] taskCycles=10433 waitQk=458 softmax=5225 spFlag=1884 waitPv=1341 rescale=1228 stacks=50 tasks=11
+vec[15.0] taskCycles=10687 waitQk=559 softmax=5611 spFlag=1769 waitPv=1388 rescale=1052 stacks=50 tasks=11
+vec[15.1] taskCycles=10927 waitQk=573 softmax=5934 spFlag=1872 waitPv=1260 rescale=999 stacks=50 tasks=11
+vec[16.0] taskCycles=9954 waitQk=604 softmax=5206 spFlag=1755 waitPv=1191 rescale=922 stacks=45 tasks=10
+vec[16.1] taskCycles=9904 waitQk=575 softmax=5137 spFlag=1688 waitPv=1270 rescale=962 stacks=45 tasks=10
+vec[17.0] taskCycles=9411 waitQk=557 softmax=4693 spFlag=1722 waitPv=1114 rescale=1051 stacks=45 tasks=10
+vec[17.1] taskCycles=9279 waitQk=520 softmax=4322 spFlag=1822 waitPv=1211 rescale=1118 stacks=45 tasks=10
+vec[18.0] taskCycles=9420 waitQk=517 softmax=4252 spFlag=1836 waitPv=1389 rescale=1158 stacks=45 tasks=10
+vec[18.1] taskCycles=9353 waitQk=480 softmax=4552 spFlag=1734 waitPv=1112 rescale=1191 stacks=45 tasks=10
+vec[19.0] taskCycles=9463 waitQk=452 softmax=4622 spFlag=1693 waitPv=1308 rescale=1111 stacks=45 tasks=10
+vec[19.1] taskCycles=9264 waitQk=405 softmax=4605 spFlag=1712 waitPv=1075 rescale=1196 stacks=45 tasks=10
+vec[20.0] taskCycles=9197 waitQk=596 softmax=4420 spFlag=1729 waitPv=1078 rescale=1090 stacks=45 tasks=10
+vec[20.1] taskCycles=9397 waitQk=538 softmax=4495 spFlag=1634 waitPv=1255 rescale=1186 stacks=45 tasks=10
+vec[21.0] taskCycles=9575 waitQk=380 softmax=4814 spFlag=1626 waitPv=1409 rescale=1019 stacks=45 tasks=10
+vec[21.1] taskCycles=9211 waitQk=389 softmax=4556 spFlag=1687 waitPv=1306 rescale=1002 stacks=45 tasks=10
+vec[22.0] taskCycles=9184 waitQk=525 softmax=4379 spFlag=1668 waitPv=1292 rescale=1051 stacks=45 tasks=10
+vec[22.1] taskCycles=9548 waitQk=513 softmax=4671 spFlag=1760 waitPv=1275 rescale=1049 stacks=45 tasks=10
+vec[23.0] taskCycles=9617 waitQk=398 softmax=4855 spFlag=1639 waitPv=1400 rescale=1051 stacks=45 tasks=10
+vec[23.1] taskCycles=9844 waitQk=339 softmax=5235 spFlag=1651 waitPv=1205 rescale=1144 stacks=45 tasks=10
+vec   Σ  taskCycles=481759 waitQk=23309 softmax=235995 spFlag=87637 waitPv=65414 rescale=55271 stacks=2304 tasks=512

@@ -27,82 +27,6 @@
 
 namespace vllm_ascend {
 
-struct DevListCache {
-    std::vector<int64_t> shadow;
-    at::Tensor pin;
-    at::Tensor dev;
-    aclrtEvent copy_ev = nullptr;
-};
-
-inline at::Tensor upload_seq_lengths(const at::IntArrayRef &list,
-                                     const at::Device &target,
-                                     DevListCache &cache) {
-    const int64_t n = static_cast<int64_t>(list.size());
-    const bool changed = (static_cast<int64_t>(cache.shadow.size()) != n) ||
-        (n > 0 && std::memcmp(cache.shadow.data(), list.data(),
-                              static_cast<size_t>(n) * sizeof(int64_t)) != 0);
-    if (cache.dev.defined() && cache.dev.device() == target) {
-        if (!changed) {
-            return cache.dev.narrow(0, 0, n);
-        }
-    } else {
-        const int64_t cap = std::max<int64_t>(n, 512);
-        cache.pin = at::empty({cap}, at::TensorOptions().dtype(at::kLong).pinned_memory(true));
-        cache.dev = at::empty({cap}, at::TensorOptions().dtype(at::kLong).device(target));
-        cache.shadow.clear();
-    }
-    if (n > 0) {
-        const int64_t cap = cache.pin.numel();
-        TORCH_CHECK(n <= cap, "seq length list exceeds cached capacity");
-        if (cache.copy_ev != nullptr) {
-            const aclError ev_rc = aclrtSynchronizeEvent(cache.copy_ev);
-            TORCH_CHECK(ev_rc == ACL_SUCCESS, "aclrtSynchronizeEvent failed: ", ev_rc);
-        }
-        std::memcpy(cache.pin.data_ptr(), list.data(), static_cast<size_t>(n) * sizeof(int64_t));
-        cache.dev.copy_(cache.pin, /*non_blocking=*/true);
-        if (cache.copy_ev == nullptr) {
-            const aclError cr_rc = aclrtCreateEvent(&cache.copy_ev);
-            TORCH_CHECK(cr_rc == ACL_SUCCESS, "aclrtCreateEvent failed: ", cr_rc);
-        }
-        const aclError rec_rc = aclrtRecordEvent(
-            cache.copy_ev, c10_npu::getCurrentNPUStream().stream(false));
-        TORCH_CHECK(rec_rc == ACL_SUCCESS, "aclrtRecordEvent failed: ", rec_rc);
-        cache.shadow.assign(list.begin(), list.end());
-    }
-    return cache.dev.narrow(0, 0, n);
-}
-
-inline std::pair<DevListCache *, DevListCache *> seq_len_caches()
-{
-    thread_local DevListCache *aq_cache = new DevListCache(), *akv_cache = new DevListCache();
-    return {aq_cache, akv_cache};
-}
-
-inline at::Tensor seq_dev_view(const at::IntArrayRef &list,
-                               const at::Device &target,
-                               DevListCache &cache) {
-    const int64_t n = static_cast<int64_t>(list.size());
-    if (!cache.dev.defined() || cache.dev.device() != target) {
-        const int64_t cap = std::max<int64_t>(n, 512);
-        cache.pin = at::empty({cap}, at::TensorOptions().dtype(at::kLong).pinned_memory(true));
-        cache.dev = at::empty({cap}, at::TensorOptions().dtype(at::kLong).device(target));
-        cache.shadow.clear();
-    }
-    TORCH_CHECK(n <= cache.pin.numel(),
-                "seq length list exceeds cached capacity: ", n, " > ",
-                cache.pin.numel());
-    return cache.dev.narrow(0, 0, n);
-}
-
-inline void npu_fused_infer_attention_score_preload_seq(
-    at::IntArrayRef actual_seq_lengths, at::IntArrayRef actual_seq_lengths_kv,
-    const at::Tensor &ref)
-{
-    auto caches = seq_len_caches();
-    upload_seq_lengths(actual_seq_lengths, ref.device(), *caches.first);
-    upload_seq_lengths(actual_seq_lengths_kv, ref.device(), *caches.second);
-}
-
 #define EXEC_NPU_CMD_WS(aclnn_api, ws_tensor, ...)                              \
   do {                                                                        \
     static const auto getWorkspaceSizeFuncAddr =                              \
@@ -181,9 +105,9 @@ inline void fia_exec_common(
     c10::string_view input_layout, int64_t num_key_value_heads,
     int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
     int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
-    bool sparse_stats_flag, bool host_seq_tiling, bool flash_decode,
+    bool sparse_stats_flag, bool flash_decode,
     at::Tensor &attention_out, at::Tensor &softmax_lse, at::Tensor &sparse_stats,
-    const c10::optional<at::Tensor> &workspace, bool no_copy = false)
+    const c10::optional<at::Tensor> &workspace)
 {
     TORCH_CHECK(query.dim() == 3, "query must be 3D TND layout");
     TORCH_CHECK(key.dim() == 3, "key must be 3D TND layout");
@@ -193,40 +117,35 @@ inline void fia_exec_common(
     std::string input_layout_str = std::string(input_layout);
     char *input_layout_ptr = const_cast<char *>(input_layout_str.c_str());
 
-    auto caches = seq_len_caches();
-    at::Tensor actual_seq_lengths_dev;
-    at::Tensor actual_seq_lengths_kv_dev;
-    if (no_copy) {
-        actual_seq_lengths_dev = seq_dev_view(actual_seq_lengths, query.device(), *caches.first);
-        actual_seq_lengths_kv_dev = seq_dev_view(actual_seq_lengths_kv, query.device(), *caches.second);
-    } else {
-        actual_seq_lengths_dev =
-            upload_seq_lengths(actual_seq_lengths, query.device(), *caches.first);
-        actual_seq_lengths_kv_dev =
-            upload_seq_lengths(actual_seq_lengths_kv, query.device(), *caches.second);
-    }
+    // host-list-only: seq lens reach the kernel via the host IntArray attrs
+    // embedded into TilingData by the op host (framework-managed upload,
+    // task-update safe). The device seq inputs are passed as absent
+    // optionals (nullptr aclTensor), mirroring the torch_npu builtin FIA
+    // interface contract of host-list-only seq lengths.
+    const c10::optional<at::Tensor> seqQAbsent;
+    const c10::optional<at::Tensor> seqKvAbsent;
 
     if (workspace.has_value()) {
         EXEC_NPU_CMD_WS(
             aclnnVllmFusedInferAttentionScore, *workspace,
             query, key, value, pse_shift, atten_mask,
-            actual_seq_lengths_dev, actual_seq_lengths_kv_dev, blocktable,
+            seqQAbsent, seqKvAbsent, blocktable,
             num_heads, scale, pre_tokens, next_tokens, input_layout_ptr,
             num_key_value_heads, sparse_mode, inner_precise, block_size,
             antiquant_mode, sparse_lambda, softmax_lse_flag,
             actual_seq_lengths, actual_seq_lengths_kv, sparse_stats_flag,
-            host_seq_tiling, flash_decode,
+            flash_decode,
             attention_out, softmax_lse, sparse_stats);
     } else {
         EXEC_NPU_CMD(
             aclnnVllmFusedInferAttentionScore,
             query, key, value, pse_shift, atten_mask,
-            actual_seq_lengths_dev, actual_seq_lengths_kv_dev, blocktable,
+            seqQAbsent, seqKvAbsent, blocktable,
             num_heads, scale, pre_tokens, next_tokens, input_layout_ptr,
             num_key_value_heads, sparse_mode, inner_precise, block_size,
             antiquant_mode, sparse_lambda, softmax_lse_flag,
             actual_seq_lengths, actual_seq_lengths_kv, sparse_stats_flag,
-            host_seq_tiling, flash_decode,
+            flash_decode,
             attention_out, softmax_lse, sparse_stats);
     }
 }
@@ -242,7 +161,7 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_fused_infer_attention_
     c10::string_view input_layout, int64_t num_key_value_heads,
     int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
     int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
-    bool sparse_stats_flag, bool host_seq_tiling, bool flash_decode)
+    bool sparse_stats_flag, bool flash_decode)
 {
     at::Tensor attention_out = at::empty(query.sizes(), query.options().dtype(query.dtype()));
     at::Tensor softmax_lse = at::empty({query.size(0), query.size(1), 1}, query.options().dtype(at::kFloat));
@@ -253,7 +172,7 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_fused_infer_attention_
                     num_heads, scale, pre_tokens, next_tokens, input_layout,
                     num_key_value_heads, sparse_mode, inner_precise, block_size,
                     antiquant_mode, sparse_lambda, softmax_lse_flag,
-                    sparse_stats_flag, host_seq_tiling, flash_decode,
+                    sparse_stats_flag, flash_decode,
                     attention_out, softmax_lse, sparse_stats, c10::nullopt);
     return std::make_tuple(attention_out, softmax_lse, sparse_stats);
 }
@@ -271,16 +190,15 @@ inline void npu_fused_infer_attention_score_out(
     c10::string_view input_layout, int64_t num_key_value_heads,
     int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
     int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
-    bool sparse_stats_flag, bool host_seq_tiling, bool flash_decode)
+    bool sparse_stats_flag, bool flash_decode)
 {
     fia_exec_common(query, key, value, pse_shift, atten_mask,
                     actual_seq_lengths, actual_seq_lengths_kv, blocktable,
                     num_heads, scale, pre_tokens, next_tokens, input_layout,
                     num_key_value_heads, sparse_mode, inner_precise, block_size,
                     antiquant_mode, sparse_lambda, softmax_lse_flag,
-                    sparse_stats_flag, host_seq_tiling, flash_decode,
-                    attention_out, softmax_lse, sparse_stats, workspace,
-                    /*no_copy=*/true);
+                    sparse_stats_flag, flash_decode,
+                    attention_out, softmax_lse, sparse_stats, workspace);
 }
 
 inline int64_t npu_fused_infer_attention_score_get_workspace(
@@ -294,17 +212,17 @@ inline int64_t npu_fused_infer_attention_score_get_workspace(
     c10::string_view input_layout, int64_t num_key_value_heads,
     int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
     int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
-    bool sparse_stats_flag, bool host_seq_tiling, bool flash_decode)
+    bool sparse_stats_flag, bool flash_decode)
 {
     TORCH_CHECK(query.dim() == 3, "query must be 3D TND layout");
     std::string input_layout_str = std::string(input_layout);
     char *input_layout_ptr = const_cast<char *>(input_layout_str.c_str());
 
-    auto caches = seq_len_caches();
-    at::Tensor actual_seq_lengths_dev =
-        seq_dev_view(actual_seq_lengths, query.device(), *caches.first);
-    at::Tensor actual_seq_lengths_kv_dev =
-        seq_dev_view(actual_seq_lengths_kv, query.device(), *caches.second);
+    // host-list-only: seq lens reach the kernel via host IntArray attrs
+    // embedded into TilingData; the device seq inputs stay absent (see
+    // fia_exec_common).
+    const c10::optional<at::Tensor> seqQAbsent;
+    const c10::optional<at::Tensor> seqKvAbsent;
     at::Tensor attention_out = at::empty(query.sizes(), query.options().dtype(query.dtype()));
     at::Tensor softmax_lse = at::empty({query.size(0), query.size(1), 1}, query.options().dtype(at::kFloat));
     at::Tensor sparse_stats = at::empty({16}, query.options().dtype(at::kInt));
@@ -328,12 +246,12 @@ inline int64_t npu_fused_infer_attention_score_get_workspace(
     aclOpExecutor **executor_addr = &executor;
     auto converted_params = ConvertTypes(
         query, key, value, pse_shift, atten_mask,
-        actual_seq_lengths_dev, actual_seq_lengths_kv_dev, blocktable,
+        seqQAbsent, seqKvAbsent, blocktable,
         num_heads, scale, pre_tokens, next_tokens, input_layout_ptr,
         num_key_value_heads, sparse_mode, inner_precise, block_size,
         antiquant_mode, sparse_lambda, softmax_lse_flag,
         actual_seq_lengths, actual_seq_lengths_kv, sparse_stats_flag,
-        host_seq_tiling, flash_decode,
+        flash_decode,
         attention_out, softmax_lse, sparse_stats,
         workspace_size_addr, executor_addr);
     static auto getWorkspaceSizeFunc =

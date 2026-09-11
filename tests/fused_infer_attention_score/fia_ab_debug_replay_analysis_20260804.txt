@@ -1,0 +1,62 @@
+FIA custom vs baseline 对称打点离线对比分析
+============================================
+日期: 2026-08-04
+运行: ASCEND_FIA_DEBUG=1 ASCEND_SLOG_PRINT_TO_STDOUT=1 \
+      python3 test_subbatch_decode.py --sizes 10
+原始日志: fia_ab_debug_replay_20260804.log (1045 行, 528 条 FIA_DBG)
+输入 dump: fia_layer20_rank0_decode_bigdiff_occ0.pt (batch=10 decode)
+
+一、数值结论
+------------
+[batch=10 tokens=10] custom vs base: max=0.000e+00 bitdiff=0/10240 ulp>=5:0
+=> 加打点后 custom 与 baseline 输出仍然 bit 级完全一致。
+   打点本身(含 K3 的 Dcci 缓存刷新)未引入数值扰动。
+
+二、打点计数 (每条唯一内容 ×4 = 2 个算子 × 2 次 printf 重复)
+------------------------------------------------------------
+H1 (host FD 条件):      2 行 — custom/baseline 各 1, 参数完全一致
+H2 (host 每核切分):    70 行 = 24 核 × 2 + splitInfo 22 — 两算子逐行相同
+K1 (kernel 每核范围):  96 行 = 24 唯一 × 4 — 两算子逐行相同
+K2 (FD 主循环迭代):   344 行 = 86 唯一 × 4 — 两算子逐行相同
+K3 (SyncAll 后合并):   16 行 = 4 唯一 × 4 — 两算子逐行相同
+
+三、关键 trace 对比 (custom == baseline, 完全一致)
+--------------------------------------------------
+H1: aicoreNum=24 batch=10 kvHeads=1 numTasks=10 maxQ=1 maxKv=43521
+    minKv=25097 paged=1 mask=1 flashDecode=1
+    (tilingKey 均含 FD 标志位 1e17)
+
+H2/K1: 10 个 splitNode 映射到 24 核, 逐核 (B/N1/S1/S2/lseOff/oOff) 两算子
+    完全相同。batch 9 (kv=43521, 86 个 512 块) 切 4 份:
+      core20 S2 0..6   lseOff=232 oOff=29696
+      core21 S2 6..35  lseOff=240 oOff=30720
+      core22 S2 35..64 lseOff=248 oOff=31744
+      core23 S2 64..86 lseOff=256 oOff=32768
+
+K2: FD 主循环逐次 (kvSIdx/kvEnd/lastStack) 两算子完全相同;
+    core20 kvSIdx=0..5, core21 kvSIdx=6..34, core22 kvSIdx=35..63,
+    core23 kvSIdx=64..85; 各 split 最后一次迭代 lastStack=1 (写部分结果)。
+
+K3 (batch9 合并输入的部分结果, head=0..8 q=0..1, o 取 col28):
+      split0 lse=10.392565 o=-0.001088
+      split1 lse= 9.879746 o=-0.002447
+      split2 lse=10.062425 o=-0.006205
+      split3 lse=13.055367 o=-0.642404  <- 尾 split 主导合并
+    两算子逐 bit 相同。
+
+四、结论
+--------
+1. 离线环境下 custom 与 baseline 的 host tiling (FD 判定/切分/workspace)
+   与 kernel 行为 (每核范围、主循环迭代、split 部分结果、LSE 合并)
+   全部一致, 输出 bit-identical。算子代码路径本身无差异。
+2. 结合四方对比 (fia_online_offline_compare.txt):
+   online_base == offline_base (输入保真) 且 offline_custom == offline_base,
+   但 online_custom 发散 (285/10240 bitdiff, 逐 token 递增 t1=3.8e-6 →
+   t9=0.529, head3 最严重) => 发散只可能来自线上运行环境差异
+   (如 block_table 张量分配外的邻居内存内容), 而非算子逻辑或输入。
+3. 下一步建议: 毒化尾部行实验 (在 oversize block_table 分配的 10..13 行
+   植入合法 block id), 验证 custom 是否存在越界读 block_table 的行为。
+
+注意: 当前 cann-9.0.0 安装的 custom_transformer 与 vllm-ascend vendor 均为
+加打点版本, 勿直接用于 serving; 恢复用
+/usr/local/Ascend/cann-9.0.0/opp/vendors/custom_transformer.bak_20260804。

@@ -114,20 +114,16 @@ class CustomFIAConfig:
         (detection only, no block skipping).
       - full_graph: allow ACL-Graph capture of the custom op through the
         host-list task-update path (DecodeOnly buckets only).
-      - host_seq_tiling: let the op's tiling read sequence lengths from host
-        attrs (zero D2H). Disable to fall back to D2H device reads.
       - flash_decode: enable the FlashDecode split path inside the custom op
         (small decode batches over long KV).
 
-    ``host_seq_tiling`` / ``flash_decode`` are forwarded to the op as tiling
-    attrs; they replace the former ``VLLM_FIA_HOST_SEQ_TILING`` /
-    ``VLLM_FIA_FD`` environment kill-switches.
+    ``flash_decode`` is forwarded to the op as a tiling attr; it replaces the
+    former ``VLLM_FIA_FD`` environment kill-switch.
     """
 
     enabled: bool = False
     sparse_lambda: float = -99.0
     full_graph: bool = False
-    host_seq_tiling: bool = True
     flash_decode: bool = True
 
 

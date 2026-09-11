@@ -184,7 +184,6 @@ aclnnStatus aclnnVllmFusedInferAttentionScoreGetWorkspaceSize(
     const aclIntArray *actualSeqLengthsQHostOptional,
     const aclIntArray *actualSeqLengthsKvHostOptional,
     bool sparseStatsFlag,
-    bool hostSeqTiling,
     bool flashDecode,
     const aclTensor *attentionOutOut,
     const aclTensor *softmaxLseOutOptional,
@@ -200,7 +199,7 @@ aclnnStatus aclnnVllmFusedInferAttentionScoreGetWorkspaceSize(
     const char *opType = "VllmFusedInferAttentionScore";
     char inputDesc[] = {1, 1, 1, 0, 0, 0, 0, 0};
     char outputDesc[] = {1, 0, 0};
-    char attrDesc[] = {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    char attrDesc[] = {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
     NNOPBASE_ASSERT_NOTNULL_RETVAL(query);
     NNOPBASE_ASSERT_NOTNULL_RETVAL(key);
@@ -268,11 +267,9 @@ aclnnStatus aclnnVllmFusedInferAttentionScoreGetWorkspaceSize(
     }
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void *>(&sparseStatsFlag), sizeof(bool),
                                                        14, kNnopbaseBool));
-    // Behavior switches from vllm_ascend CustomFIAConfig (former getenv kill-switches)
-    NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void *>(&hostSeqTiling), sizeof(bool),
-                                                       15, kNnopbaseBool));
+    // Behavior switch from vllm_ascend CustomFIAConfig (former getenv kill-switch VLLM_FIA_FD)
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddAttrWithDtype(*executor, static_cast<void *>(&flashDecode), sizeof(bool),
-                                                       16, kNnopbaseBool));
+                                                       15, kNnopbaseBool));
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddOutput(*executor, attentionOutOut, 0));
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddOutput(*executor, softmaxLseOutOptional, 1));
     NNOPBASE_ASSERT_OK_RETVAL(NnopbaseAddOutput(*executor, sparseStatsOutOptional, 2));

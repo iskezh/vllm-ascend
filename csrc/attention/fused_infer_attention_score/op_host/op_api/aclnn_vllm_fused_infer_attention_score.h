@@ -48,7 +48,6 @@ aclnnStatus aclnnVllmFusedInferAttentionScoreGetWorkspaceSize(
     const aclIntArray *actualSeqLengthsQHostOptional,
     const aclIntArray *actualSeqLengthsKvHostOptional,
     bool sparseStatsFlag,
-    bool hostSeqTiling,
     bool flashDecode,
     const aclTensor *attentionOutOut,
     const aclTensor *softmaxLseOutOptional,

@@ -50,7 +50,6 @@ public:
     uint16_t     sp_flag_arr = 0;
 
     float sparseLamda;
-    bool sparseStatsMode = false;
 
     static constexpr uint32_t BLOCK_SIZE_IN_BYTE = 32;
     static constexpr uint32_t REPEAT_SIZE_IN_BYTE = 256;
@@ -73,11 +72,10 @@ public:
     BlockEpilogue() {}
 
     __aicore__ inline
-    void init(Arch::Resource<ArchTag> &resource, float scaleValue_, float sparseLamda_ = -99.0f, bool sparseStatsMode_ = false)
+    void init(Arch::Resource<ArchTag> &resource, float scaleValue_, float sparseLamda_ = -99.0f)
     {
         sp_flag = 0;
         sparseLamda = sparseLamda_;
-        sparseStatsMode = sparseStatsMode_;
         // Allocate UB space
         constexpr uint32_t LS_UB_TENSOR_OFFSET = 0;
         constexpr uint32_t LP_UB_TENSOR_OFFSET = 4 * UB_UINT8_BLOCK_SIZE;
@@ -645,28 +643,38 @@ public:
 
                 float dm_val = dmUbTensor[dmUbOffsetCurCycle].GetValue(0);
                 spRes = dm_val < sparseLamda;
+#ifdef FIA_SPDBG  // SPDBG: print sp decision inputs (block0/rowOffset0 only, rate-limited)
+                if (AscendC::GetBlockIdx() == 0 && rowOffset == 0) {
+                    float lm_val = lmUbTensor[rowOffset].GetValue(0);
+                    float gm_val = gmUbTensor[rowOffset].GetValue(0);
+                    AscendC::printf("[SPDBG] lm_x1k=%d gm_x1k=%d dm_x1k=%d lam_x1k=%d res=%d\n",
+                        static_cast<int>(lm_val * 1000), static_cast<int>(gm_val * 1000),
+                        static_cast<int>(dm_val * 1000), static_cast<int>(sparseLamda * 1000),
+                        static_cast<int>(spRes));
+                }
+#endif
                 if (spRes == 1) {
                     uint32_t first_group = rowOffset / 16;
                     uint32_t last_group = (rowOffset + rowNumCurLoop - 1) / 16;
                     for (uint32_t group = first_group; group <= last_group; group++) {
                         sp_flag_arr |= (1 << group);
                     }
-                    if (!sparseStatsMode) {
-                        *sp_flag_temp = 1;
+                    // Real-skip only: propagate the skip decision and stop
+                    // this rowloop's softmax work right here.
+                    *sp_flag_temp = 1;
 
-                        AscendC::Duplicate<float, false>(
-                            dmUbTensor[dmUbOffsetCurCycle],
-                            1, (uint64_t)0, 1, 1, 8);
-                        AscendC::PipeBarrier<PIPE_V>();
+                    AscendC::Duplicate<float, false>(
+                        dmUbTensor[dmUbOffsetCurCycle],
+                        1, (uint64_t)0, 1, 1, 8);
+                    AscendC::PipeBarrier<PIPE_V>();
 
-                        AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
-                        return;
-                    }
+                    AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
+                    return;
                 }
             }
             *sp_flag_temp = 0;
-            if (!(sparseStatsMode && spRes)) {
-                sp_flag = 0;
+            sp_flag = 0;
+            {
                 uint32_t first_group = rowOffset / 16;
                 uint32_t last_group = (rowOffset + rowNumCurLoop - 1) / 16;
                 for (uint32_t group = first_group; group <= last_group; group++) {

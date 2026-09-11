@@ -126,9 +126,9 @@ namespace SplitFuse {
             AscendC::GlobalTensor<int32_t> gBlockTable;
             gBlockTable.SetGlobalBuffer((__gm__ int32_t *)(params.blockTables));
             AscendC::GlobalTensor<int64_t> gActualQseqlen;
-            gActualQseqlen.SetGlobalBuffer((__gm__ int64_t *)params.actualQseqlen);
+            gActualQseqlen.SetGlobalBuffer((__gm__ int64_t *)fATilingData->actualQSeq);
             AscendC::GlobalTensor<int64_t> gActualKvseqlen;
-            gActualKvseqlen.SetGlobalBuffer((__gm__ int64_t *)params.actualKvseqlen);
+            gActualKvseqlen.SetGlobalBuffer((__gm__ int64_t *)fATilingData->actualKvSeq);
             AscendC::GlobalTensor<ElementO> gO;
             gO.SetGlobalBuffer((__gm__ ElementO *)params.o);
             AscendC::GlobalTensor<ElementLse> gLse;
@@ -203,7 +203,7 @@ namespace SplitFuse {
             uint32_t L1_QK_SIZE = BlockMmadQK::L1TileShape::M * kDynNum * sizeof(ElementQ);
             blockMmadQK.init(resource, nDynNum, kDynNum, MAX_KV_STACK_LEN);
             uint32_t kPVDynNum = nDynNum * kDynNum / BlockMmadPV::L1TileShape::M;
-            blockMmadPV.init(resource, nDynNum, kPVDynNum, MAX_KV_STACK_LEN, L1_QK_SIZE, sparseStatsEnabled);
+            blockMmadPV.init(resource, nDynNum, kPVDynNum, MAX_KV_STACK_LEN, L1_QK_SIZE);
 #endif
 #ifdef __DAV_C220_VEC__
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
@@ -224,7 +224,7 @@ namespace SplitFuse {
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
 
-            epilogueOnlineSoftmax.init(resource, scaleValue, sparseLamda, sparseStatsEnabled);
+            epilogueOnlineSoftmax.init(resource, scaleValue, sparseLamda);
             epilogueRescaleO.init(resource);
             epilogueInitOut.init(resource);
 
@@ -237,34 +237,6 @@ namespace SplitFuse {
             embedRound = NpuArch::Detail::Alignment::RoundUp(embed, FaiKernel::BLOCK_SIZE);
             embedRoundV = NpuArch::Detail::Alignment::RoundUp(embedV, FaiKernel::BLOCK_SIZE);
             groupSize = qHeads / kvHeads;
-
-            if (fATilingData->devTaskMode == 1U) {
-                totalTaskNum = 0;
-                for (uint32_t bIdx = 0; bIdx < batch; ++bIdx) {
-                    uint32_t qSeqlenTmp = static_cast<uint32_t>(gActualQseqlen.GetValue(bIdx));
-                    uint32_t kvSeqlenTmp = static_cast<uint32_t>(gActualKvseqlen.GetValue(bIdx));
-                    if constexpr(INPUT_LAYOUT == FaiKernel::inputLayout::TND) {
-                        if (bIdx > 0U) {
-                            qSeqlenTmp -= static_cast<uint32_t>(gActualQseqlen.GetValue(bIdx - 1));
-                            if constexpr (!PAGED_CACHE_FLAG) {
-                                kvSeqlenTmp -= static_cast<uint32_t>(gActualKvseqlen.GetValue(bIdx - 1));
-                            }
-                        }
-                    }
-                    uint32_t curQNBlockTileTmp = GetQNBlockTile(qSeqlenTmp, groupSize);
-                    uint32_t qNBlockNumPerGroupTmp =
-                        NpuArch::Detail::Alignment::CeilDiv(groupSize, curQNBlockTileTmp);
-                    uint32_t curQNBlockNumTmp = qNBlockNumPerGroupTmp * kvHeads;
-                    uint32_t curQSBlockTileTmp = GetQSBlockTile(kvSeqlenTmp);
-                    uint32_t curQSBlockNumTmp =
-                        NpuArch::Detail::Alignment::CeilDiv(qSeqlenTmp, curQSBlockTileTmp);
-                    uint32_t curTaskNumTmp = curQNBlockNumTmp * curQSBlockNumTmp;
-                    if (bIdx == 0U) {
-                        firstBatchTaskNum = curTaskNumTmp;
-                    }
-                    totalTaskNum += curTaskNumTmp;
-                }
-            }
 
             totalQTokens = static_cast<uint32_t>(gActualQseqlen.GetValue(batch - 1));
 
@@ -422,6 +394,12 @@ namespace SplitFuse {
                 AscendC::DataCacheCleanAndInvalid<int32_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
                     AscendC::DcciDst::CACHELINE_OUT>(gSparseStats[coreIdx * 16]);
             }
+#ifdef FIA_SPDBG  // SPDBG: print final sparse counters for core0
+            if (coreIdx == 0) {
+                AscendC::printf("[SPDBG-END core0] sparseNum=%d countNum=%d\n",
+                    static_cast<int>(blockMmadPV.sparseNum), static_cast<int>(blockMmadPV.countNum));
+            }
+#endif
 #endif
 #ifdef __DAV_C220_VEC__
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
@@ -799,8 +777,8 @@ namespace SplitFuse {
                         LayoutUpdate layoutUpdate(rowNum, embed, embedRound);
                         LayoutLse layoutLse(totalQTokens, qHeads);
                         uint64_t gmOffsetUpdate = (uint64_t)(coreIdx * WORKSPACE_BLOCK_SIZE_DB);
-                        bool sp_flag = sparseStatsEnabled ? false : gSpTempArr[curStackTileMod];
-                        uint16_t sp_flag_arr = sparseStatsEnabled ? 0 : gSpRowLoopArr[curStackTileMod];
+                        bool sp_flag = gSpTempArr[curStackTileMod];
+                        uint16_t sp_flag_arr = gSpRowLoopArr[curStackTileMod];
                         bool isFirstStack = stackSeqCount - PRE_LAUNCH == 0;
                         bool isLastStack = nowkvSIdx + 1 >= kvSLoopNumTotal;
                         typename EpilogueRescaleO::SplitKVParams splitParams;

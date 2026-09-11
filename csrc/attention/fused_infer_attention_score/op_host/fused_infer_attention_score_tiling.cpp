@@ -477,6 +477,11 @@ void FAInferTiling::fillSplitInfoForFlashDecode(FAInferTilingData &faTilingData,
 
 void FAInferTiling::splitBN2S1GS2(FAInferTilingData &faTilingData)
 {
+    // The FD tiling arrays are sized MAX_CORE_NUM_FD (26): clamp the core
+    // count BEFORE dividing tasks across cores, or fillCoreInfoForFlashDecode
+    // / fillSplitInfoForFlashDecode would write past the arrays on SoCs with
+    // more AI cores (the current gate bounds numTasks, not the core count).
+    blockNum_ = std::min(blockNum_, static_cast<uint32_t>(MAX_CORE_NUM_FD));
     uint64_t totalTaskNum = 0;
     uint32_t groupSize = faInfo_.numHeads / faInfo_.kvHeads;
 
@@ -495,39 +500,12 @@ ge::graphStatus FAInferTiling::DoTiling(FAInferTilingData &tilingdata)
     tilingdata.set_splitLseTotalSize(0);
     tilingdata.set_splitOTotalSize(0);
     FillBasicTilingData(tilingdata);
-    if (faInfo_.devTaskMode) {
-        tilingdata.set_firstBatchTaskNum(0);
-        tilingdata.set_totalTaskNum(0);
-    } else {
-        FillSplitCoreTilingData(tilingdata);
-        if (faInfo_.flashDecodeFlag) {
-            splitBN2S1GS2(tilingdata);
-        }
+    FillSplitCoreTilingData(tilingdata);
+    if (faInfo_.flashDecodeFlag) {
+        splitBN2S1GS2(tilingdata);
     }
-    tilingdata.set_devTaskMode(faInfo_.devTaskMode ? 1U : 0U);
     tilingdata.set_sparseStatsFlag(faInfo_.sparseStatsFlag ? 1U : 0U);
     FillWorkSpaceTilingData(tilingdata);
-    return ge::GRAPH_SUCCESS;
-}
-
-static ge::graphStatus CopySeqLengthsToHost(const gert::Tensor *tensor, std::vector<int64_t> &hostData)
-{
-    int64_t shapeSize = tensor->GetShapeSize();
-    OPS_ERR_IF(shapeSize <= 0,
-               OPS_LOG_E("VllmFusedInferAttentionScore", "invalid seq length tensor size"),
-               return ge::GRAPH_FAILED);
-    hostData.resize(static_cast<size_t>(shapeSize));
-    auto placement = tensor->GetPlacement();
-    const int64_t *src = tensor->GetData<int64_t>();
-    size_t bytes = static_cast<size_t>(shapeSize) * sizeof(int64_t);
-    if (gert::TensorPlacementUtils::IsOnHost(placement)) {
-        std::memcpy(hostData.data(), src, bytes);
-    } else {
-        aclError ret = aclrtMemcpy(hostData.data(), bytes, src, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
-        OPS_ERR_IF(ret != ACL_SUCCESS,
-                   OPS_LOG_E("VllmFusedInferAttentionScore", "aclrtMemcpy for seq lengths failed"),
-                   return ge::GRAPH_FAILED);
-    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -552,10 +530,10 @@ static ge::graphStatus TilingPrepareForVllmFusedInferAttentionScore(gert::Tiling
     return ge::GRAPH_SUCCESS;
 }
 
-// Behavior switches are op attrs fed from vllm_ascend CustomFIAConfig
-// (host_seq_tiling / flash_decode), replacing the former getenv kill-switches
-// VLLM_FIA_HOST_SEQ_TILING / VLLM_FIA_FD: per-call, reviewable, and stable
-// under graph capture (getenv was cached once per process via static init).
+// The flash_decode behavior switch is an op attr fed from
+// CustomFIAConfig.flash_decode, replacing the former getenv kill-switch
+// VLLM_FIA_FD: per-call, reviewable, and stable under graph capture
+// (getenv was cached once per process via static init).
 static bool GetBoolAttrOrDefault(const gert::TilingContext *context, uint32_t attrIndex, bool defVal)
 {
     auto attrs = context->GetAttrs();
@@ -694,19 +672,33 @@ static ge::graphStatus ConvertContextToFAInferContext(gert::TilingContext *conte
 
     auto actualQSeq = context->GetOptionalInputTensor(FIA_ACTUAL_SEQ_LENGTHS_INPUT_INDEX);
     auto actualKvSeq = context->GetOptionalInputTensor(FIA_ACTUAL_SEQ_LENGTHS_KV_INPUT_INDEX);
-    OPS_ERR_IF(actualQSeq == nullptr || actualKvSeq == nullptr,
-               OPS_LOG_E("VllmFusedInferAttentionScore", "actual_seq_lengths and actual_seq_lengths_kv are required"),
-               return ge::GRAPH_FAILED);
-    OPS_ERR_IF(actualQSeq->GetDataType() != ge::DT_INT64 || actualKvSeq->GetDataType() != ge::DT_INT64,
-               OPS_LOG_E("VllmFusedInferAttentionScore", "actual_seq_lengths must be INT64"),
+    // host-list-only: the device seq inputs are absent (adapter passes empty
+    // optionals); the host IntArray attrs are the single source of seq lens.
+    OPS_ERR_IF((actualQSeq != nullptr || actualKvSeq != nullptr) &&
+               (actualQSeq == nullptr || actualKvSeq == nullptr),
+               OPS_LOG_E("VllmFusedInferAttentionScore", "seq inputs must be passed as a pair"),
                return ge::GRAPH_FAILED);
     const bool hostSeqAvail = !hostActualQSeq.empty() && !hostActualKvSeq.empty();
-    const int64_t *actualSeqQ = hostSeqAvail ? hostActualQSeq.data() : nullptr;
-    const int64_t *actualSeqKv = hostSeqAvail ? hostActualKvSeq.data() : nullptr;
-    int32_t batch = hostSeqAvail ? static_cast<int32_t>(hostActualQSeq.size())
-                                 : static_cast<int32_t>(actualQSeq->GetShapeSize());
+    OPS_ERR_IF(!hostSeqAvail,
+               OPS_LOG_E("VllmFusedInferAttentionScore",
+                         "host seq attrs are required (host-list-only mode)"),
+               return ge::GRAPH_FAILED);
+    const int64_t *actualSeqQ = hostActualQSeq.data();
+    const int64_t *actualSeqKv = hostActualKvSeq.data();
+    int32_t batch = static_cast<int32_t>(hostActualQSeq.size());
     OPS_ERR_IF(batch <= 0,
                OPS_LOG_E("VllmFusedInferAttentionScore", "invalid actual_seq_lengths size"),
+               return ge::GRAPH_FAILED);
+    // Length equality must be checked HERE: ConvertContextToFAInferContext
+    // indexes actualSeqKv[b] for b < batch, so a shorter kv list would be a
+    // host heap out-of-bounds read before any later guard runs.
+    OPS_ERR_IF(hostActualQSeq.size() != hostActualKvSeq.size(),
+               OPS_LOG_E("VllmFusedInferAttentionScore", "q/kv seq list size mismatch"),
+               return ge::GRAPH_FAILED);
+    OPS_ERR_IF(batch > FIA_MAX_HOST_SEQ_LIST,
+               OPS_LOG_E("VllmFusedInferAttentionScore",
+                         "batch ", batch, " exceeds FIA_MAX_HOST_SEQ_LIST ",
+                         FIA_MAX_HOST_SEQ_LIST, " (tiling-embedded seq)"),
                return ge::GRAPH_FAILED);
 
     auto blockTableShape = context->GetOptionalInputShape(FIA_BLOCK_TABLE_INPUT_INDEX);
@@ -768,7 +760,6 @@ static ge::graphStatus ConvertContextToFAInferContext(gert::TilingContext *conte
     }
     faInfo.maxQSeqlen = static_cast<int64_t>(maxQSeqlen);
     faInfo.maxKvSeqlen = static_cast<int64_t>(maxKvSeqlen);
-    faInfo.devTaskMode = !hostSeqAvail;
 
     faInfo.flashDecodeFlag = false;
     uint32_t groupSize = static_cast<uint32_t>(faInfo.numHeads / faInfo.kvHeads);
@@ -808,29 +799,16 @@ ge::graphStatus TilingVllmFusedInferAttentionScore(gert::TilingContext *context)
     FAInferContext faInfo;
     std::vector<int64_t> hostActualQSeq;
     std::vector<int64_t> hostActualKvSeq;
-    auto actualQSeqTensor = context->GetOptionalInputTensor(FIA_ACTUAL_SEQ_LENGTHS_INPUT_INDEX);
-    auto actualKvSeqTensor = context->GetOptionalInputTensor(FIA_ACTUAL_SEQ_LENGTHS_KV_INPUT_INDEX);
-    OPS_ERR_IF(actualQSeqTensor == nullptr || actualKvSeqTensor == nullptr,
-               OPS_LOG_E("VllmFusedInferAttentionScore", "actual_seq_lengths tensors are required"),
-               return ge::GRAPH_FAILED);
-    ge::graphStatus ret = ge::GRAPH_SUCCESS;
     bool hostSeqFromAttr =
         TryGetSeqLengthsFromAttr(context, FIA_ACTUAL_SEQ_LENGTHS_Q_HOST_ATTR_INDEX, hostActualQSeq) &&
         TryGetSeqLengthsFromAttr(context, FIA_ACTUAL_SEQ_LENGTHS_KV_HOST_ATTR_INDEX, hostActualKvSeq);
-    if (!hostSeqFromAttr) {
-        hostActualQSeq.clear();
-        hostActualKvSeq.clear();
-        if (GetBoolAttrOrDefault(context, FIA_HOST_SEQ_TILING_ATTR_INDEX, true)) {
-            ret = CopySeqLengthsToHost(actualQSeqTensor, hostActualQSeq);
-            if (ret != ge::GRAPH_SUCCESS) {
-                return ret;
-            }
-            ret = CopySeqLengthsToHost(actualKvSeqTensor, hostActualKvSeq);
-            if (ret != ge::GRAPH_SUCCESS) {
-                return ret;
-            }
-        }
-    }
+    // host-list-only: host IntArray attrs are the single source; the adapter
+    // no longer uploads device seq tensors (no D2H fallback path either).
+    OPS_ERR_IF(!hostSeqFromAttr,
+               OPS_LOG_E("VllmFusedInferAttentionScore",
+                         "host seq attrs are required (host-list-only mode)"),
+               return ge::GRAPH_FAILED);
+    ge::graphStatus ret = ge::GRAPH_SUCCESS;
     ret = ConvertContextToFAInferContext(context, faInfo, hostActualQSeq, hostActualKvSeq, coreNum);
     if (ret != ge::GRAPH_SUCCESS) {
         return ret;
@@ -845,13 +823,21 @@ ge::graphStatus TilingVllmFusedInferAttentionScore(gert::TilingContext *context)
                OPS_LOG_E("VllmFusedInferAttentionScore", "FAInferTiling DoTiling failed"),
                return ge::GRAPH_FAILED);
 
-    OPS_LOG_I(context->GetNodeName(),
+    OPS_LOG_D(context->GetNodeName(),
               "FIA debug: key=%lu paged=%d fd=%d mask=%d lse=%d "
               "maxQ=%ld maxKv=%ld layout=%s dtype=%d sparseLambda=%.2f",
               faTiling.GetTilingKey(), faInfo.pagedCacheFlag,
               faInfo.flashDecodeFlag, static_cast<int>(faInfo.maskType), faInfo.lseFlag,
               faInfo.maxQSeqlen, faInfo.maxKvSeqlen,
               faInfo.layout.c_str(), static_cast<int>(faInfo.dataType), faInfo.sparseLamda);
+
+    // host-list-only: embed the seq lists into the tiling data so the kernel
+    // reads them from the framework-managed tiling buffer (task-update safe),
+    // replacing the adapter-uploaded device seq inputs.
+    for (size_t i = 0; i < hostActualQSeq.size(); ++i) {
+        faTilingData.get_actualQSeq()[i] = hostActualQSeq[i];
+        faTilingData.get_actualKvSeq()[i] = hostActualKvSeq[i];
+    }
 
     faTilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(faTilingData.GetDataSize());

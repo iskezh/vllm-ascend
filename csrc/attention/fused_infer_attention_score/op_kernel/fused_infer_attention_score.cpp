@@ -106,7 +106,13 @@ namespace SplitFuse {
                                                 PagedCacheFlag, maskCategory, inLayout,
                                                 Epilogue::Block::CombineScale<OType, LseType>, isFD>;
 
-        FAIKernelParams params{q, k, v, mask, blockTables, actualQseqlen, actualKvseqlen, o, lse, sparseStats, workspace, tiling};
+        // actualQseqlen / actualKvseqlen stay in the launch ABI (op inputs 5/6
+        // remain declared OPTIONAL in the op def) but are absent in
+        // host-list-only mode; seq lens come from fATilingData->actualQSeq /
+        // actualKvSeq instead. Do not reintroduce reads of these pointers.
+        (void)actualQseqlen;
+        (void)actualKvseqlen;
+        FAIKernelParams params{q, k, v, mask, blockTables, o, lse, sparseStats, workspace, tiling};
         FAInferKernelType flashAttnInfer;
         flashAttnInfer(params);
     }

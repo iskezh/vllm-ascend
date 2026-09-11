@@ -27,6 +27,10 @@
 
 namespace optiling {
 constexpr int32_t MAX_CORE_NUM_FD = 26;
+// host-list-only: seq lens are embedded in TilingData (framework-managed
+// upload, task-update safe) instead of a device input tensor. Decode
+// cudagraph buckets top out at 96; 256 covers eager mixed batches.
+constexpr int32_t FIA_MAX_HOST_SEQ_LIST = 256;
 
 BEGIN_TILING_DATA_DEF(splitNode)
 TILING_DATA_FIELD_DEF_ARR(int32_t, MAX_CORE_NUM_FD, batchIdx)
@@ -83,7 +87,6 @@ TILING_DATA_FIELD_DEF(uint32_t, tailLoopTaskNum)
 TILING_DATA_FIELD_DEF(uint32_t, tailStartBatch)
 TILING_DATA_FIELD_DEF(uint32_t, tailStartN2)
 TILING_DATA_FIELD_DEF(uint32_t, tailKvNBlockTile)
-TILING_DATA_FIELD_DEF(uint32_t, devTaskMode)
 TILING_DATA_FIELD_DEF(uint32_t, sparseStatsFlag)
 TILING_DATA_FIELD_DEF(uint64_t, sparseStatsSize)
 TILING_DATA_FIELD_DEF(uint32_t, totalSplitNodeNum)
@@ -91,6 +94,8 @@ TILING_DATA_FIELD_DEF(uint64_t, splitLseTotalSize)
 TILING_DATA_FIELD_DEF(uint64_t, splitOTotalSize)
 TILING_DATA_FIELD_DEF_STRUCT(coreNode, coreInfo)
 TILING_DATA_FIELD_DEF_STRUCT(splitNode, splitInfo)
+TILING_DATA_FIELD_DEF_ARR(int64_t, FIA_MAX_HOST_SEQ_LIST, actualQSeq)
+TILING_DATA_FIELD_DEF_ARR(int64_t, FIA_MAX_HOST_SEQ_LIST, actualKvSeq)
 END_TILING_DATA_DEF
 
 const uint32_t SIZE_OF_16BIT = 2;
@@ -138,7 +143,6 @@ struct FAInferContext {
     bool pagedCacheFlag = false;
     bool lseFlag = false;
     bool flashDecodeFlag = false;
-    bool devTaskMode = false;
     bool sparseStatsFlag = false;
     std::string layout;
 };
@@ -218,8 +222,7 @@ constexpr uint32_t FIA_SOFTMAX_LSE_FLAG_ATTR_INDEX = 11;
 constexpr uint32_t FIA_ACTUAL_SEQ_LENGTHS_Q_HOST_ATTR_INDEX = 12;
 constexpr uint32_t FIA_ACTUAL_SEQ_LENGTHS_KV_HOST_ATTR_INDEX = 13;
 constexpr uint32_t FIA_SPARSE_STATS_FLAG_ATTR_INDEX = 14;
-constexpr uint32_t FIA_HOST_SEQ_TILING_ATTR_INDEX = 15;
-constexpr uint32_t FIA_FLASH_DECODE_ATTR_INDEX = 16;
+constexpr uint32_t FIA_FLASH_DECODE_ATTR_INDEX = 15;
 
 constexpr uint32_t FIA_SPARSE_STATS_INDEX = 2;
 

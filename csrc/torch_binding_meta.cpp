@@ -2059,9 +2059,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_fused_infer_attention_score_m
     c10::string_view input_layout, int64_t num_key_value_heads,
     int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
     int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
-    bool sparse_stats_flag, bool host_seq_tiling, bool flash_decode)
+    bool sparse_stats_flag, bool flash_decode)
 {
-    (void)host_seq_tiling; (void)flash_decode;
+    (void)flash_decode;
     at::Tensor attention_out = at::empty_symint(query.sym_sizes(), query.options());
     at::Tensor softmax_lse = at::empty_symint(
         {query.sym_size(0), query.sym_size(1), 1},
@@ -2088,7 +2088,7 @@ void npu_fused_infer_attention_score_out_meta(
     c10::string_view input_layout, int64_t num_key_value_heads,
     int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
     int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
-    bool sparse_stats_flag, bool host_seq_tiling, bool flash_decode)
+    bool sparse_stats_flag, bool flash_decode)
 {
     (void)query; (void)key; (void)value; (void)attention_out; (void)softmax_lse;
     (void)sparse_stats; (void)workspace; (void)pse_shift; (void)atten_mask;
@@ -2097,18 +2097,12 @@ void npu_fused_infer_attention_score_out_meta(
     (void)input_layout; (void)num_key_value_heads; (void)sparse_mode;
     (void)inner_precise; (void)block_size; (void)antiquant_mode; (void)sparse_lambda;
     (void)softmax_lse_flag; (void)sparse_stats_flag;
-    (void)host_seq_tiling; (void)flash_decode;
-}
-
-// Meta for preload_seq：纯 host 副作用（预热 pinned 缓存），无返回。
-void npu_fused_infer_attention_score_preload_seq_meta(
-    at::IntArrayRef actual_seq_lengths, at::IntArrayRef actual_seq_lengths_kv,
-    const at::Tensor &ref)
-{
-    (void)actual_seq_lengths; (void)actual_seq_lengths_kv; (void)ref;
+    (void)flash_decode;
 }
 
 // Meta for get_workspace：返回值在 trace 期符号化，真实大小由运行时 impl 提供。
+// 返回的 query.size(0) 仅为 schema 占位（fake/meta 模式下无法推导真实 workspace
+// 尺寸）；任何依赖该返回值分配 workspace 的路径都必须走真实 op。
 int64_t npu_fused_infer_attention_score_get_workspace_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const c10::optional<at::Tensor> &pse_shift,
@@ -2120,7 +2114,7 @@ int64_t npu_fused_infer_attention_score_get_workspace_meta(
     c10::string_view input_layout, int64_t num_key_value_heads,
     int64_t sparse_mode, int64_t inner_precise, int64_t block_size,
     int64_t antiquant_mode, double sparse_lambda, bool softmax_lse_flag,
-    bool sparse_stats_flag, bool host_seq_tiling, bool flash_decode)
+    bool sparse_stats_flag, bool flash_decode)
 {
     (void)key; (void)value; (void)pse_shift; (void)atten_mask;
     (void)actual_seq_lengths; (void)actual_seq_lengths_kv; (void)blocktable;
@@ -2128,7 +2122,7 @@ int64_t npu_fused_infer_attention_score_get_workspace_meta(
     (void)input_layout; (void)num_key_value_heads; (void)sparse_mode;
     (void)inner_precise; (void)block_size; (void)antiquant_mode; (void)sparse_lambda;
     (void)softmax_lse_flag; (void)sparse_stats_flag;
-    (void)host_seq_tiling; (void)flash_decode;
+    (void)flash_decode;
     return query.size(0);
 }
 
@@ -2263,7 +2257,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_fused_infer_attention_score", &vllm_ascend::meta::npu_fused_infer_attention_score_meta);
     // Fused infer attention score graph-mode variants
     ops.impl("npu_fused_infer_attention_score_out", &vllm_ascend::meta::npu_fused_infer_attention_score_out_meta);
-    ops.impl("npu_fused_infer_attention_score_preload_seq", &vllm_ascend::meta::npu_fused_infer_attention_score_preload_seq_meta);
     ops.impl("npu_fused_infer_attention_score_get_workspace", &vllm_ascend::meta::npu_fused_infer_attention_score_get_workspace_meta);
 }
 }

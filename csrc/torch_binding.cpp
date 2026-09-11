@@ -3620,7 +3620,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                int sparse_mode=0, int inner_precise=0, int block_size=0,"
         "                                int antiquant_mode=0, float sparse_lambda=-99.0,"
         "                                bool softmax_lse_flag=False, bool sparse_stats_flag=False,"
-        "                                bool host_seq_tiling=True, bool flash_decode=True)"
+        "                                bool flash_decode=True)"
         " -> (Tensor attention_out, Tensor softmax_lse, Tensor sparse_stats)"
     );
     ops.impl("npu_fused_infer_attention_score", torch::kPrivateUse1, &vllm_ascend::npu_fused_infer_attention_score);
@@ -3639,20 +3639,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                int sparse_mode=0, int inner_precise=0, int block_size=0,"
         "                                int antiquant_mode=0, float sparse_lambda=-99.0,"
         "                                bool softmax_lse_flag=False, bool sparse_stats_flag=False,"
-        "                                bool host_seq_tiling=True, bool flash_decode=True)"
+        "                                bool flash_decode=True)"
         " -> ()"
     );
     ops.impl("npu_fused_infer_attention_score_out", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_infer_attention_score_out);
-
-    // 图模式辅助：capture 前 / task-update 窗口前预热 seq pinned 缓存（窗口内 H2D
-    // copy_ / event record 被 CANN 拒，必须在窗口外以普通 runtime op 完成上传）。
-    ops.def(
-        "npu_fused_infer_attention_score_preload_seq(int[] actual_seq_lengths,"
-        "                                int[] actual_seq_lengths_kv, Tensor ref) -> ()"
-    );
-    ops.impl("npu_fused_infer_attention_score_preload_seq", torch::kPrivateUse1,
-             &vllm_ascend::npu_fused_infer_attention_score_preload_seq);
 
     // 图模式辅助：只算 workspace 大小不 launch（按 bucket 预分配常驻 workspace 用；
     // seqlen 影响 FD 追加区大小，调用方传上界值）。
@@ -3666,7 +3657,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                int sparse_mode=0, int inner_precise=0, int block_size=0,"
         "                                int antiquant_mode=0, float sparse_lambda=-99.0,"
         "                                bool softmax_lse_flag=False, bool sparse_stats_flag=False,"
-        "                                bool host_seq_tiling=True, bool flash_decode=True)"
+        "                                bool flash_decode=True)"
         " -> int"
     );
     ops.impl("npu_fused_infer_attention_score_get_workspace", torch::kPrivateUse1,
