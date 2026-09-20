@@ -1,10 +1,12 @@
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_config import BlasstConfig
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
@@ -30,6 +32,7 @@ from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import AscendDeviceType
 
 LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
+BLASST_GET_WS_PATH = "vllm_ascend.attention.attention_v1.torch.ops._C_ascend.npu_blasst_attention_score_get_workspace"
 
 
 class TestAttentionGraphHelpers(TestBase):
@@ -1009,3 +1012,256 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertEqual(mock_paged_attention.call_args.kwargs["context_lens"], current_seq_lens)
         mock_graph_task_update_begin.assert_called_once()
         mock_graph_task_update_end.assert_called_once()
+
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.stream")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_begin")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_end")
+    @patch(BLASST_GET_WS_PATH, create=True, return_value=0)
+    @patch("vllm_ascend.attention.attention_v1.torch.ops._C_ascend.npu_blasst_attention_score_out", create=True)
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1.get_ascend_config")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1._blasst_grown_workspace", None)
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    def test_update_graph_params_blasst_branch(
+        self,
+        mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
+        mock_EXTRA_CTX,
+        mock_get_ascend_config,
+        mock_get_graph_params,
+        mock_blasst_out,
+        mock_blasst_get_workspace,
+        mock_graph_task_update_end,
+        mock_graph_task_update_begin,
+        mock_stream,
+    ):
+        """BlasST-tagged captured params take the BlasST rebinding branch."""
+        mock_EXTRA_CTX.sinks = False
+        mock_EXTRA_CTX.is_draft_model = False
+        blasst_config = BlasstConfig(enabled=True)
+        mock_get_ascend_config.return_value = SimpleNamespace(blasst_config=blasst_config)
+
+        layer_key = "model.layers.0.self_attn.attn"
+        # 15-slot BlasST capture tuple (see full_graph_blasst); the layer_name
+        # slot resolves metadata independent of the zip iteration order, so an
+        # unrelated extra metadata entry must not disturb the rebinding.
+        # Mixed tensor/int/str/tag slots: typed Any so mypy's MagicMock
+        # list overloads don't flag the str/int assignments below.
+        param: list[Any] = [MagicMock() for _ in range(14)]
+        # Real tensor so the replay-time workspace sufficiency check compares
+        # against a concrete numel(); the mocked get_workspace returns 0, so
+        # the captured workspace is kept (no grow, no resident swap).
+        param[8] = torch.empty(4096, dtype=torch.uint8)  # workspace
+        param[9] = 128  # block_size
+        param[13] = layer_key
+        param.append(attn_module._BLASST_TASK_TAG)
+
+        mock_get_graph_params.return_value.attn_params = {1: [tuple(param)]}
+        mock_get_graph_params.return_value.handles = {1: [MagicMock()]}
+        mock_get_graph_params.return_value.events = {1: [MagicMock()]}
+
+        metadata = SimpleNamespace(
+            actual_seq_lengths_q=[1, 2],
+            seq_lens_list=[3, 4],
+            block_tables=MagicMock(),
+        )
+        forward_context = MagicMock()
+        forward_context.attn_metadata = {layer_key: metadata, "gdn.layer": MagicMock()}
+
+        self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
+
+        self.assertEqual(mock_blasst_out.call_count, 1)
+        mock_blasst_get_workspace.assert_called_once()
+        kwargs = mock_blasst_out.call_args.kwargs
+        self.assertIs(kwargs["query"], param[0])
+        self.assertIs(kwargs["key"], param[1])
+        self.assertIs(kwargs["workspace"], param[8])
+        self.assertIs(kwargs["blocktable"], metadata.block_tables)
+        self.assertEqual(kwargs["block_size"], 128)
+        self.assertEqual(kwargs["actual_seq_lengths"], [1, 2])
+        self.assertEqual(kwargs["actual_seq_lengths_kv"], [3, 4])
+        self.assertEqual(kwargs["sparse_lambda"], blasst_config.sparse_lambda)
+        self.assertEqual(kwargs["sparse_mode"], attn_module.BLASST_SPARSE_MODE_COMPRESSED_CAUSAL)
+        mock_graph_task_update_begin.assert_called_once()
+        mock_graph_task_update_end.assert_called_once()
+
+
+class TestBlasstGate(TestBase):
+    """Gating of the BlasST dispatch.
+
+    Every unsupported case must fall back to the baseline FIA path instead of
+    reaching the op (which either fails loudly or, for non-causal batches,
+    computes silently wrong output). Static limits are folded into
+    ``_blasst_supported`` at init; per-call limits live in the gate.
+    """
+
+    @staticmethod
+    def _impl(**overrides):
+        """Partial instance covering exactly what _can_use_blasst reads."""
+        impl = object.__new__(AscendAttentionBackendImpl)
+        impl._blasst_supported = overrides.pop("supported", True)
+        impl.key_cache = overrides.pop("key_cache", object())
+        impl.value_cache = None
+        impl._use_layer_aware_fia_graph_replay = overrides.pop("layer_aware", False)
+        assert not overrides, overrides
+        return impl
+
+    @staticmethod
+    def _meta(**overrides):
+        meta = AscendMetadata()
+        meta.causal = True
+        meta.attn_state = AscendAttentionState.DecodeOnly
+        meta.actual_seq_lengths_q = [1, 2]
+        meta.num_decodes = 0
+        meta.num_prefills = 0
+        for key, value in overrides.items():
+            setattr(meta, key, value)
+        return meta
+
+    def _gate(self, impl, meta, *, capturing=False, is_draft=False):
+        # _EXTRA_CTX attributes are set dynamically at runtime, so replace the
+        # module-level name with a stub instead of patching its attributes.
+        extra_ctx = SimpleNamespace(capturing=capturing, is_draft_model=is_draft)
+        with patch.object(attn_module, "_EXTRA_CTX", extra_ctx):
+            return impl._can_use_blasst(meta)
+
+    def test_supported_decode_batch_passes(self):
+        self.assertTrue(self._gate(self._impl(), self._meta()))
+
+    def test_static_unsupported_short_circuits(self):
+        self.assertFalse(self._gate(self._impl(supported=False), self._meta()))
+
+    def test_non_causal_falls_back(self):
+        # sparse_mode=3 maps to causal masking unconditionally in the op and
+        # non-causal batches carry attn_mask=None -> silent wrong output.
+        self.assertFalse(self._gate(self._impl(), self._meta(causal=False)))
+
+    def test_batch_over_host_seq_limit_falls_back(self):
+        limit = attn_module.BLASST_MAX_HOST_SEQ
+        self.assertFalse(self._gate(self._impl(), self._meta(actual_seq_lengths_q=list(range(1, limit + 2)))))
+        # exactly at the limit still passes
+        self.assertTrue(self._gate(self._impl(), self._meta(actual_seq_lengths_q=list(range(1, limit + 1)))))
+
+    def test_missing_kv_cache_falls_back_for_cache_states(self):
+        impl = self._impl(key_cache=None)
+        self.assertFalse(self._gate(impl, self._meta()))
+        # PrefillNoCache reads the new K/V directly and needs no cache handle.
+        self.assertTrue(self._gate(impl, self._meta(attn_state=AscendAttentionState.PrefillNoCache)))
+
+    def test_mixed_chunked_batch_routes_regardless_of_phase_split(self):
+        # Mixed decode+prefill chunked batches run as one fused BlasST call on
+        # all hardware: the baseline phase-split only avoids
+        # batch-composition-dependent numerics, and the fused call was
+        # validated against per-phase FIA (LongBench-v2, 50/50 agreement).
+        impl = self._impl()
+        mixed = dict(attn_state=AscendAttentionState.ChunkedPrefill, num_decodes=1, num_prefills=1)
+        self.assertTrue(self._gate(impl, self._meta(**mixed)))
+
+    def test_capture_requires_full_graph_and_decode_only(self):
+        impl = self._impl()
+        full_cfg = SimpleNamespace(blasst_config=SimpleNamespace(full_graph=True))
+        off_cfg = SimpleNamespace(blasst_config=SimpleNamespace(full_graph=False))
+        with patch.object(attn_module, "get_ascend_config", return_value=off_cfg):
+            self.assertFalse(self._gate(impl, self._meta(), capturing=True))
+        with patch.object(attn_module, "get_ascend_config", return_value=full_cfg):
+            self.assertTrue(self._gate(impl, self._meta(), capturing=True))
+            # non-decode buckets never capture through the custom path
+            self.assertFalse(
+                self._gate(impl, self._meta(attn_state=AscendAttentionState.ChunkedPrefill), capturing=True)
+            )
+
+    def test_capture_draft_model_and_layer_aware_fall_back(self):
+        impl = self._impl()
+        cfg = SimpleNamespace(blasst_config=SimpleNamespace(full_graph=True))
+        with patch.object(attn_module, "get_ascend_config", return_value=cfg):
+            self.assertFalse(self._gate(impl, self._meta(), capturing=True, is_draft=True))
+            self.assertFalse(self._gate(self._impl(layer_aware=True), self._meta(), capturing=True))
+
+    def test_unsupported_states_fall_back(self):
+        impl = self._impl()
+        for state in (AscendAttentionState.PrefillCacheHit, AscendAttentionState.SpecDecoding):
+            self.assertFalse(self._gate(impl, self._meta(attn_state=state)))
+
+    def _init_impl(
+        self,
+        *,
+        enabled=True,
+        dtype=torch.float16,
+        kv_dtype="auto",
+        head_size=128,
+        sliding_window=None,
+        sinks=None,
+        batch_invariant=False,
+        op_registered=True,
+        quant=None,
+    ):
+        vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+            kv_transfer_config=None,
+            quant_config=quant,
+            # cache_config.cache_dtype is what __init__ resolves
+            # self.kv_cache_dtype from (the ctor arg no longer feeds it).
+            cache_config=SimpleNamespace(cache_dtype=kv_dtype),
+            # hf_config feeds the hybrid linear-attention gate in __init__.
+            model_config=SimpleNamespace(dtype=dtype, hf_config=None),
+        )
+        with (
+            patch.object(attn_module, "get_current_vllm_config", return_value=vllm_config),
+            patch.object(
+                attn_module,
+                "get_ascend_config",
+                return_value=SimpleNamespace(blasst_config=BlasstConfig(enabled=enabled)),
+            ),
+            patch.object(attn_module, "needs_layer_aware_fia_graph_replay", return_value=False),
+            patch.object(attn_module.envs_vllm, "VLLM_BATCH_INVARIANT", batch_invariant),
+            patch.object(attn_module, "_blasst_op_registered", return_value=op_registered),
+        ):
+            return AscendAttentionBackendImpl(
+                num_heads=16,
+                head_size=head_size,
+                scale=0.088,
+                num_kv_heads=4,
+                alibi_slopes=None,
+                sliding_window=sliding_window,
+                kv_cache_dtype=kv_dtype,
+                logits_soft_cap=None,
+                attn_type="decoder",
+                kv_sharing_target_layer_name=None,
+                sinks=sinks,
+            )
+
+    def test_static_capability_matrix(self):
+        self.assertTrue(self._init_impl()._blasst_supported)
+        # head_dim 256 (e.g. Qwen3.5 full-attention layers) is supported in
+        # addition to 128; other head sizes stay on the baseline path.
+        self.assertTrue(self._init_impl(head_size=256)._blasst_supported)
+        # Quantized KV dtypes only construct with a C8 quant config (the
+        # __init__ dtype validation rejects them otherwise); C8 models must
+        # stay on the baseline path.
+        c8_quant = SimpleNamespace(enable_c8_quant=True)
+        for kwargs in (
+            dict(enabled=False),
+            # Builds without the registered op (wrong SoC / missing csrc
+            # build) stay on the baseline path even when enabled.
+            dict(op_registered=False),
+            # Model-dtype axis in isolation: "auto" KV would follow the fp32
+            # model dtype and trip the __init__ C8 validation, so pin fp16 KV.
+            dict(dtype=torch.float32, kv_dtype="float16"),
+            dict(kv_dtype="fp8", quant=c8_quant),
+            dict(kv_dtype="int8", quant=c8_quant),
+            dict(head_size=64),
+            dict(head_size=192),
+            dict(sliding_window=512),
+            dict(sinks=torch.zeros(1)),
+            dict(batch_invariant=True),
+        ):
+            self.assertFalse(self._init_impl(**kwargs)._blasst_supported, kwargs)
+
+    def test_host_seq_limit_constant_matches_op_tiling(self):
+        # The Python gate and the C++ tiling array are one contract kept in
+        # two languages; if FIA_MAX_HOST_SEQ_LIST (tiling.h) changes, this
+        # test must be updated in lockstep (see the comment at
+        # BLASST_MAX_HOST_SEQ in attention_v1.py).
+        self.assertEqual(attn_module.BLASST_MAX_HOST_SEQ, 256)
