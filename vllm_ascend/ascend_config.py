@@ -187,6 +187,10 @@ class BlasstConfig:
         host-list task-update path (DecodeOnly buckets only).
       - flash_decode: enable the FlashDecode split path inside the custom op
         (small decode batches over long KV).
+      - collect_sparse_stats: log block-skip statistics from the op's third
+        output, split by forward branch (prefill vs decode). Off by default:
+        it turns on the kernel-side stats epilogue and adds a small device
+        accumulation per call, so keep it off for performance runs.
 
     ``flash_decode`` is forwarded to the op as a tiling attr; it replaces the
     former ``VLLM_FIA_FD`` environment kill-switch.
@@ -196,6 +200,7 @@ class BlasstConfig:
     sparse_lambda: float = -99.0
     full_graph: bool = False
     flash_decode: bool = True
+    collect_sparse_stats: bool = False
 
 
 @config

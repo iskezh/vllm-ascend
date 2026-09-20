@@ -123,6 +123,7 @@ Controls the BlasstAttentionScore (BlasST) op, an AscendC attention kernel that 
 | `sparse_lambda` | float | `-99.0` | BlasST block-sparse threshold. `-99.0` means dense (no block skipping). |
 | `full_graph` | bool | `False` | Whether to allow ACL-Graph capture of the custom op through the host-list task-update path (decode-only buckets). |
 | `flash_decode` | bool | `True` | Whether to enable the FlashDecode split path inside the custom op (small decode batches over long KV). |
+| `collect_sparse_stats` | bool | `False` | Whether to log block-skip statistics from the op's third output, split by forward branch (prefill vs decode). Keep off for performance runs: it enables the kernel-side stats epilogue and a small per-call device accumulation. |
 
 **eplb_config**
 

@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -113,6 +114,91 @@ _BLASST_TASK_TAG = object()
 _blasst_grown_workspace: torch.Tensor | None = None
 
 
+class _BlasstSkipStats:
+    """BlasST skip-block counters, prefill / decode branches split.
+
+    The op's third output is an int32[16] tensor whose first two elements
+    carry the call's [skipped_blocks, total_blocks] as a kernel-side
+    cross-core sum with overwrite semantics (see
+    csrc/.../blasst_attention_score_kernel.h). Reading it from host needs a
+    D2H sync -- illegal inside graph capture and wasteful per step -- so
+    every call adds into one resident int64 device tensor
+    ([prefill_skipped, prefill_total, decode_skipped, decode_total]); in the
+    decode full-graph path the add itself is captured into the graph, so the
+    host code there runs only at capture time. Reports sync at a coarse
+    cadence and derive window deltas from host-side snapshots: the device
+    tensor is never reset, which keeps the captured adds free of any
+    cross-stream reset-ordering hazard.
+
+    Decode call counts differ by mode: eager decode counts one host call per
+    layer per step, while graph decode only counts replays (each replay
+    executes the captured per-layer adds, ``ncall``-style precision is not
+    available without host hooks per step). Warmup steps land in the first
+    report window.
+    """
+
+    # Eager side reports on a time cadence; the graph-decode side counts
+    # update_graph_params passes (one per replay).
+    REPORT_INTERVAL_S = 30.0
+    REPORT_STEPS = 200
+
+    def __init__(self) -> None:
+        # Strong ref on purpose: captured graph adds bake this address in, so
+        # the buffer must outlive every graph referencing it.
+        self.accum = torch.zeros(4, dtype=torch.int64, device="npu")
+        self.calls = [0, 0]  # host-observed calls since last report: [prefill, decode]
+        self.replays = 0  # decode graph replays since last report
+        self._snapshot = [0, 0, 0, 0]  # accum values at the previous report
+        self._next_report_ts = time.monotonic() + self.REPORT_INTERVAL_S
+
+    def accumulate(self, sparse_stats: torch.Tensor, decode: bool) -> None:
+        base = 2 if decode else 0
+        self.accum[base : base + 2] += sparse_stats[:2].to(torch.int64)
+        self.calls[1 if decode else 0] += 1
+
+    def report_if_due(self) -> None:
+        now = time.monotonic()
+        if now < self._next_report_ts:
+            return
+        self._next_report_ts = now + self.REPORT_INTERVAL_S
+        # tolist() syncs the current stream, which carries the pending adds.
+        self._report(self.accum.tolist())
+
+    def note_decode_replay(self) -> None:
+        self.replays += 1
+        if self.replays % self.REPORT_STEPS == 0:
+            # Replays accumulate on the compute stream; a device-wide sync
+            # makes the read see every completed replay (report-only path).
+            torch.npu.synchronize()
+            self._report(self.accum.tolist())
+
+    def _report(self, values: list[int]) -> None:
+        window = [v - s for v, s in zip(values, self._snapshot)]
+        self._snapshot = values
+        p_calls, d_calls = self.calls
+        replays = self.replays
+        self.calls = [0, 0]
+        self.replays = 0
+
+        def rate(skipped: int, total: int) -> str:
+            return f"{skipped}/{total} ({100.0 * skipped / total:.2f}%)" if total else "0/0"
+
+        logger.info(
+            "BlasST skip stats: prefill %s blocks over %d calls, "
+            "decode %s blocks over %d replays / %d eager calls",
+            rate(window[0], window[1]),
+            p_calls,
+            rate(window[2], window[3]),
+            replays,
+            d_calls,
+        )
+
+
+# Skip-statistics accumulator for blasst_config.collect_sparse_stats; created
+# once at model-load time (see the per-layer init), before any graph capture.
+_blasst_skip_stats: _BlasstSkipStats | None = None
+
+
 def _blasst_op_kwargs(blasst_config, num_heads: int, num_kv_heads: int, scale: float) -> dict:
     """Shared tail args of the BlasST op calls.
 
@@ -132,7 +218,9 @@ def _blasst_op_kwargs(blasst_config, num_heads: int, num_kv_heads: int, scale: f
         antiquant_mode=0,
         sparse_lambda=blasst_config.sparse_lambda,
         softmax_lse_flag=False,
-        sparse_stats_flag=False,
+        # Kernel-side stats epilogue (third output); collected by
+        # _BlasstSkipStats when blasst_config.collect_sparse_stats is set.
+        sparse_stats_flag=blasst_config.collect_sparse_stats,
         flash_decode=blasst_config.flash_decode,
     )
 
@@ -631,6 +719,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # dict -- and re-read the global config -- on every layer of every
         # eager step, i.e. 64x per decode step.
         self._blasst_op_kwargs_cached: dict | None = None
+        # Skip-statistics accumulator, created before any graph capture on
+        # purpose: full_graph_blasst bakes the accumulator address into
+        # captured adds, and allocating (or zero-filling) inside the capture
+        # region would either bind graph-pool memory or re-zero on every
+        # replay. One shared global serves every layer.
+        global _blasst_skip_stats
+        if (
+            _blasst_skip_stats is None
+            and self._blasst_supported
+            and blasst_cfg is not None
+            and blasst_cfg.collect_sparse_stats
+        ):
+            _blasst_skip_stats = _BlasstSkipStats()
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -961,6 +1062,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             )
                             torch.npu.graph_task_update_end(update_stream)
                             event.record(update_stream)
+                    if _blasst_skip_stats is not None:
+                        # One pass per decode replay: reports every
+                        # REPORT_STEPS replays (reads completed-replay state,
+                        # i.e. everything up to the previous step).
+                        _blasst_skip_stats.note_decode_replay()
                     return
                 # Only standard (FIA) attention layers have captured graph
                 # params here; linear/GDN layers (GDNAttentionMetadata) are
@@ -1666,7 +1772,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self._blasst_op_kwargs_cached = _blasst_op_kwargs(
                 get_ascend_config().blasst_config, self.num_heads, self.num_kv_heads, self.scale
             )
-        attn_output, _, _ = torch.ops._C_ascend.npu_blasst_attention_score(
+        attn_output, _, sparse_stats = torch.ops._C_ascend.npu_blasst_attention_score(
             query,
             key,
             value,
@@ -1678,6 +1784,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_size=block_size,
             **self._blasst_op_kwargs_cached,
         )
+        if _blasst_skip_stats is not None:
+            # DecodeOnly here means the eager decode branch (graph mode runs
+            # decode through full_graph_blasst); prefill-no-cache and mixed
+            # chunked-prefill batches both count as the prefill branch.
+            _blasst_skip_stats.accumulate(
+                sparse_stats, attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            )
+            _blasst_skip_stats.report_if_due()
 
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
@@ -1700,8 +1814,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
           TilingData（框架托管上传，capture/update 均合法），与 torch_npu
           内置 FIA 的 host list 接口契约一致；窗口内组里只剩纯 aclnn
           launch，拓扑恒定；
-        - 图内禁用统计输出（softmax_lse/sparse_stats，host 读 device 在
-          capture/replay 下非法）。
+        - 图内禁 softmax_lse；sparse_stats 经 blasst_config.collect_sparse_stats
+          可选开启——host 读 device 在 capture/replay 下非法，改为图内对常驻
+          int64 累加器做设备侧 add（capture 期一次录制，每次 replay 各层自增，
+          update_graph_params 每 N 步 replay 后同步读出并打日志）。
 
         host 侧参数记录成 15 元组（弱引用张量 + 标量 + layer_name）append
         到 graph_params.attn_params，末位 _BLASST_TASK_TAG 供 update 侧
@@ -1722,8 +1838,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attention_out = torch.empty(query.shape, dtype=query.dtype, device=query.device)
         softmax_lse = torch.empty(query.shape[0], self.num_heads, 1, dtype=torch.float32, device=query.device)
         # 与 adapter/proto/meta 的 {16} 对齐（kernel 对 stats 张量做整 64B
-        # cacheline 回写，16 int32 是防踩邻的安全下限）；图内
-        # sparse_stats_flag=False 实际不写入。
+        # cacheline 回写，16 int32 是防踩邻的安全下限）；sparse_stats_flag
+        # 由 _blasst_op_kwargs 随 blasst_config.collect_sparse_stats 给出，
+        # 关闭时 kernel 不写入该张量。
         sparse_stats = torch.empty(16, dtype=torch.int32, device=query.device)
 
         # 常驻 workspace：FD 追加区随 batch 与 kv 增长，按满 batch ×
@@ -1808,6 +1925,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
+
+        if _blasst_skip_stats is not None:
+            # Captured into the graph: every replay re-reads this layer's
+            # sparse_stats (rewritten by the task-updated op call above) and
+            # adds its [skipped, total] into the resident decode counters.
+            # This host line runs once, at capture time only.
+            _blasst_skip_stats.accum[2:4] += sparse_stats[:2].to(torch.int64)
 
         attn_output = attention_out.view(num_tokens, self.num_heads, self.head_size)
         return attn_output, num_tokens

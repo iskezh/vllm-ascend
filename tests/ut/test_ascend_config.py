@@ -118,17 +118,20 @@ class TestBlasstConfig(TestBase):
         # Op-behavior switch defaults on (former env kill-switch VLLM_FIA_FD
         # defaulted to enabled).
         self.assertTrue(defaults.flash_decode)
+        self.assertFalse(defaults.collect_sparse_stats)
 
         explicit = BlasstConfig(
             enabled=True,
             sparse_lambda=-3.0,
             full_graph=True,
             flash_decode=False,
+            collect_sparse_stats=True,
         )
         self.assertTrue(explicit.enabled)
         self.assertEqual(explicit.sparse_lambda, -3.0)
         self.assertTrue(explicit.full_graph)
         self.assertFalse(explicit.flash_decode)
+        self.assertTrue(explicit.collect_sparse_stats)
 
     def test_lax_bool_and_unknown_key(self):
         config = BlasstConfig(  # type: ignore[arg-type]
