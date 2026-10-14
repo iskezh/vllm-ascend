@@ -626,7 +626,7 @@ public:
 
     __aicore__ inline
     void UpdateGlobalRowMax(uint32_t rowNumCurLoop, uint32_t rowNumCurLoopRound, uint32_t columnNum,
-        uint32_t columnNumRound, uint32_t dmUbOffsetCurCycle, uint32_t rowOffset, uint32_t isFirstStackTile, uint32_t pingpongFlag, uint8_t* sp_flag_temp)
+        uint32_t columnNumRound, uint32_t dmUbOffsetCurCycle, uint32_t rowOffset, uint32_t isFirstStackTile, uint32_t pingpongFlag, uint8_t* sp_flag_temp, bool allowSparse = true)
     {
         if (isFirstStackTile) {
             AscendC::DataCopy(
@@ -641,7 +641,7 @@ public:
         } else {
             SetVecMask(rowNumCurLoop);
             bool spRes = false;
-            if (sp_flag == 1 && spEnabled) {
+            if (sp_flag == 1 && spEnabled && allowSparse) {
                 // *** dm = lm - gm (compute diff to detect sparsity)
                 AscendC::Sub<float, false>(
                     dmUbTensor[dmUbOffsetCurCycle],
@@ -920,7 +920,8 @@ public:
             rowOffset,
             isFirstStackTile,
             pingpongFlag,
-            &sp_flag_temp);
+            &sp_flag_temp,
+            !doTriUMask);  // FIX: 对角线掩码 tile 上禁用稀疏跳过（该路径与稀疏判定存在竞态致 NaN）
 
         if (sp_flag_temp == 1) {
             AscendC::Duplicate<float, false>(

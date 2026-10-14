@@ -782,9 +782,13 @@ public:
                     blockParams.gCombineo = splitParams.gCombineo[gmloffset];
                 }
                 // compute sparse row offset from sp_flag_arr bitmap
+                // FIX(910b NaN): PV GEMM 的输出 OTmp 不做行压缩（整块写满 rowNum 行，
+                // 被跳过的行组只是 P 被清零），因此这里绝不能按位图偏移读取——
+                // 一旦前导行组稀疏而后面的不稀疏，非零偏移会读错行/越界读到陈旧 GM，
+                // 产生非确定性 NaN。强制偏移为 0。
                 uint32_t sp_flag_row_offset = 0;
                 uint16_t x = (~sp_flag_arr) & 0x0F;
-                if (x != 0) {
+                if (false && x != 0) {
                     int pos = 0;
                     while ((x & 1) == 0) {
                         x >>= 1;
