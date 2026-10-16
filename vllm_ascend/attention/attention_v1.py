@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -76,6 +77,11 @@ BLASST_MAX_HOST_SEQ = 256
 # The op tiling accepts sparse_mode 0 (no mask) or 3 (compressed causal).
 BLASST_SPARSE_MODE_COMPRESSED_CAUSAL = 3
 BLASST_SPARSE_MODE_NO_MASK = 0
+# The sparse path was only validated on dense attention, so hybrid models --
+# those interleaving linear_attention and full_attention layers, e.g. Qwen3.5/
+# Qwen3.8 with full_attention_interval -- are excluded by default. They can opt
+# in here; only the full_attention layers then take the blasst branch.
+_BLASST_ALLOW_HYBRID = os.environ.get("VLLM_BLASST_ALLOW_HYBRID", "0") == "1"
 
 
 _blasst_grown_workspace: torch.Tensor | None = None
@@ -689,7 +695,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self._blasst_supported = (
             blasst_cfg.enabled
             and _blasst_registered
-            and not self._is_hybrid_linear
+            and (not self._is_hybrid_linear or _BLASST_ALLOW_HYBRID)
             and self.vllm_config.model_config.dtype in (torch.float16, torch.bfloat16)
             and self.kv_cache_dtype in (torch.float16, torch.bfloat16)
             and self.head_size in (128, 256)
